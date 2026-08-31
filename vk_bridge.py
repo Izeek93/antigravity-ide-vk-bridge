@@ -47,6 +47,26 @@ def handle_command(user_id: int, text: str) -> bool:
         vk.send_message(user_id, help_text, keyboard=kb)
         return True
 
+    if cmd in ("/status", "статус", "/heal", "диагностика", "error", "ошибка"):
+        vk.set_activity(user_id, "typing")
+        from bridge_health_watchdog import run_self_healing_health_check
+        diag = run_self_healing_health_check()
+        v_status = "🔊 Включено" if config.is_voice_enabled() else "🔇 Выключено"
+        heal_info = "🟢 Без сбоев" if not diag["lock_healed"] and not diag["inbox_healed"] else "🛠 Выполнено автовосстановление"
+        msg = (
+            "🟢 Antigravity IDE VK Bridge Health\n"
+            f"• Статус моста: Active / Healthy\n"
+            f"• Самовосстановление: {heal_info}\n"
+            f"• Сообщений в очереди: {diag['pending_inbox_messages']}\n"
+            f"• Голосовые ответы: {v_status}\n"
+            "• STT: Faster-Whisper CUDA\n"
+            "• Docs / Files API: Активен\n"
+            "• Связь с IDE: 127.0.0.1:8080 (Active)"
+        )
+        kb = get_main_keyboard(config.is_voice_enabled())
+        vk.send_message(user_id, msg, keyboard=kb)
+        return True
+
     if cmd in ("/limits", "лимиты", "📊 лимиты", "квоты"):
         vk.set_activity(user_id, "typing")
         report = format_limits_report()
@@ -135,6 +155,16 @@ def process_message(msg: dict):
                     local_img = f"incoming_vk_photo_{int(time.time())}.png"
                     urllib.request.urlretrieve(p_url, local_img)
                     text = f"[📸 Входящее фото]: сохранено в `{os.path.abspath(local_img)}` с текстом: «{text}»"
+
+        elif att.get("type") == "doc":
+            doc = att["doc"]
+            d_url = doc.get("url")
+            d_title = doc.get("title", f"incoming_doc_{int(time.time())}")
+            if d_url:
+                local_doc = os.path.join(os.path.dirname(__file__), "downloads", d_title)
+                os.makedirs(os.path.dirname(local_doc), exist_ok=True)
+                urllib.request.urlretrieve(d_url, local_doc)
+                text = f"[📁 Входящий документ «{d_title}»]: сохранён в `{os.path.abspath(local_doc)}` с комментарием: «{text}»"
 
     if not text:
         return

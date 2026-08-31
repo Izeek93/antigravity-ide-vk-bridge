@@ -15,6 +15,12 @@ def send_voice_to_user(user_id: int, voice_path: str):
     kb = get_main_keyboard(config.is_voice_enabled())
     return vk.send_message(user_id, "", keyboard=kb, attachment=att)
 
+def send_document_to_user(user_id: int, file_path: str, caption: str = ""):
+    att = vk.upload_document(user_id, file_path)
+    kb = get_main_keyboard(config.is_voice_enabled())
+    formatted = format_for_vk(caption) if caption else ""
+    return vk.send_message(user_id, formatted, keyboard=kb, attachment=att)
+
 def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = None):
     # 1. Send text
     send_message_to_user(user_id, text)
@@ -36,8 +42,14 @@ def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = No
 if __name__ == "__main__":
     if len(sys.argv) > 2:
         target_uid = int(sys.argv[1])
-        msg_text = " ".join(sys.argv[2:])
-        send_reply_with_optional_voice(target_uid, msg_text)
-        print(f"Delivered to VK user {target_uid}!")
+        if sys.argv[2] == "--doc" and len(sys.argv) > 3:
+            doc_file = sys.argv[3]
+            doc_caption = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
+            send_document_to_user(target_uid, doc_file, doc_caption)
+            print(f"Document {doc_file} delivered to VK user {target_uid}!")
+        else:
+            msg_text = " ".join(sys.argv[2:])
+            send_reply_with_optional_voice(target_uid, msg_text)
+            print(f"Delivered to VK user {target_uid}!")
     else:
-        print("Usage: python send_vk.py <user_id> <message>")
+        print("Usage: python send_vk.py <user_id> <message> | python send_vk.py <user_id> --doc <file_path> [caption]")
