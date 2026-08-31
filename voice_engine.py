@@ -55,23 +55,28 @@ def synthesize_voice(text: str, output_path: str = "voice_reply.ogg") -> str:
     abs_out = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(abs_out), exist_ok=True)
     
-    # Run OmniVoice inside WSL if available
+    # Run OmniVoice inside WSL if available with safe argument passing
     cmd = [
         "wsl", "-d", "Ubuntu", "-e", "bash", "-c",
-        f"~/.openclaw/workspace/skills/local-voice-replies/scripts/omnivoice_voice_reply.sh --channel telegram --text {subprocess.list2cmdline([clean_text])}"
+        '~/.openclaw/workspace/skills/local-voice-replies/scripts/omnivoice_voice_reply.sh --channel telegram --text "$1"',
+        "bash",
+        clean_text
     ]
     
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if result.returncode == 0:
-            wsl_ogg_path = result.stdout.strip().split("\n")[-1].strip()
-            if wsl_ogg_path.endswith(".ogg"):
+            lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+            if lines and lines[-1].endswith(".ogg"):
+                wsl_ogg_path = lines[-1]
                 wsl_win_path = abs_out.replace("\\", "/").replace("C:", "/mnt/c")
                 copy_cmd = ["wsl", "-d", "Ubuntu", "-e", "cp", wsl_ogg_path, wsl_win_path]
                 subprocess.run(copy_cmd, check=True)
                 return abs_out
-    except Exception:
-        pass
+        else:
+            print(f"[voice_engine error] returncode {result.returncode}: {result.stderr}", file=sys.stderr)
+    except Exception as e:
+        print(f"[voice_engine exception] {e}", file=sys.stderr)
         
     return abs_out
 
