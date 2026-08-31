@@ -1,0 +1,15 @@
+.env
+secrets.json
+voice_settings.json
+__pycache__/
+*.pyc
+media/
+*.ogg
+*.wav
+*.mp3
+*.png
+*.jpg
+venv/
+.venv/
+inbox.json
+vk_inbox.json

@@ -1,0 +1,16 @@
+{
+  "plan": "Google AI Pro",
+  "gemini_models": {
+    "five_hour_remaining_pct": 84,
+    "five_hour_refresh_in": "4ч 23м",
+    "weekly_remaining_pct": 69,
+    "weekly_refresh_in": "4 дня 12 часов"
+  },
+  "claude_gpt_models": {
+    "five_hour_remaining_pct": 100,
+    "five_hour_refresh_in": "Полный объем",
+    "weekly_remaining_pct": 100,
+    "weekly_refresh_in": "Полный объем"
+  },
+  "credits_overage": "Выключено (только квоты плана)"
+}
