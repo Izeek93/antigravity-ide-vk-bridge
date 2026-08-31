@@ -58,7 +58,9 @@ def set_activity(user_id: int, activity_type: str = "typing"):
 def upload_photo(user_id: int, photo_path: str) -> str:
     """Uploads a photo to VK messages server and returns attachment string 'photo{owner_id}_{id}'"""
     upload_server = call_api("photos.getMessagesUploadServer", {"peer_id": user_id})
-    upload_url = upload_server["upload_url"]
+    upload_url = upload_server.get("upload_url")
+    if not upload_url:
+        raise RuntimeError("Failed to get photos upload server URL")
 
     # Multipart upload
     boundary = "----WebKitFormBoundary" + "".join([str(random.randint(0, 9)) for _ in range(16)])
@@ -76,12 +78,18 @@ def upload_photo(user_id: int, photo_path: str) -> str:
     with urllib.request.urlopen(req, timeout=30) as r:
         upload_resp = json.loads(r.read().decode("utf-8"))
 
+    photo_val = upload_resp.get("photo")
+    if not photo_val or photo_val == "[]":
+        raise RuntimeError(f"VK photos upload server returned invalid photo data: {upload_resp}")
+
     # Save messages photo
     save_resp = call_api("photos.saveMessagesPhoto", {
-        "photo": upload_resp["photo"],
+        "photo": photo_val,
         "server": upload_resp["server"],
         "hash": upload_resp["hash"],
     })
+    if not save_resp:
+        raise RuntimeError("Failed to save uploaded photo in VK")
     saved = save_resp[0]
     return f"photo{saved['owner_id']}_{saved['id']}"
 
@@ -91,7 +99,9 @@ def upload_audiomessage(user_id: int, audio_path: str) -> str:
         "peer_id": user_id,
         "type": "audio_message"
     })
-    upload_url = upload_server["upload_url"]
+    upload_url = upload_server.get("upload_url")
+    if not upload_url:
+        raise RuntimeError("Failed to get docs upload server URL")
 
     boundary = "----WebKitFormBoundary" + "".join([str(random.randint(0, 9)) for _ in range(16)])
     with open(audio_path, "rb") as f:
@@ -108,8 +118,12 @@ def upload_audiomessage(user_id: int, audio_path: str) -> str:
     with urllib.request.urlopen(req, timeout=30) as r:
         upload_resp = json.loads(r.read().decode("utf-8"))
 
+    file_val = upload_resp.get("file")
+    if not file_val:
+        raise RuntimeError(f"VK docs upload server returned invalid file data: {upload_resp}")
+
     save_resp = call_api("docs.save", {
-        "file": upload_resp["file"]
+        "file": file_val
     })
-    audio_doc = save_resp["audio_message"]
+    audio_doc = save_resp.get("audio_message") or save_resp.get("doc", {})
     return f"doc{audio_doc['owner_id']}_{audio_doc['id']}"
