@@ -3,19 +3,35 @@ import re
 def format_for_vk(text: str) -> str:
     """
     Cleans up and formats Markdown text for VK messages.
-    Preserves bold readability, code blocks, lists and emojis.
+    VK does not support raw Markdown tags (**bold**, `code`), so this converter
+    transforms them into clean, polished mobile-friendly text.
     """
     if not text:
         return ""
-        
-    # Replace markdown links [text](url) with 'text: url' or 'text (url)'
+
+    # 1. Transform markdown links [text](url) -> 'text (url)'
     text = re.sub(r"\[([^\]]+)\]\(([^\)]+)\)", r"\1 (\2)", text)
-    
-    # Clean double asterisks if needed or keep standard
-    # Convert headers (# Header) to clean bold/emoji style
+
+    # 2. Transform headers (# Header) -> '📌 Header'
     text = re.sub(r"^#{1,3}\s+(.+)$", r"📌 \1", text, flags=re.MULTILINE)
-    
-    # Strip excessive empty lines
+
+    # 3. Transform multi-line code blocks ```lang ... ``` into clean quoted blocks
+    def format_code_block(match):
+        code = match.group(1).strip()
+        return f"\n──────────────\n{code}\n──────────────\n"
+    text = re.sub(r"```(?:\w+)?\n?(.*?)```", format_code_block, text, flags=re.DOTALL)
+
+    # 4. Transform inline backticks `code` -> «code»
+    text = re.sub(r"`([^`]+)`", r"«\1»", text)
+
+    # 5. Remove bold asterisks **text** -> text (since VK does not parse **)
+    text = re.sub(r"\*\*([^\*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^\*]+)\*", r"\1", text)
+
+    # 6. Normalize bullet lists (- item / * item -> • item)
+    text = re.sub(r"^\s*[\-\*]\s+", r"• ", text, flags=re.MULTILINE)
+
+    # 7. Strip excessive empty lines
     text = re.sub(r"\n{3,}", "\n\n", text)
-    
+
     return text.strip()

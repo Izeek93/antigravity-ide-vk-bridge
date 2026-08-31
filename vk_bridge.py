@@ -58,13 +58,18 @@ def handle_command(user_id: int, text: str) -> bool:
         vk.set_activity(user_id, "photo")
         shot_path = capture_desktop("desktop_vk.png")
         if shot_path and os.path.exists(shot_path):
-            att = vk.upload_photo(user_id, shot_path)
-            kb = get_main_keyboard(config.is_voice_enabled())
-            vk.send_message(user_id, "📸 Снимок экрана рабочего стола ПК:", keyboard=kb, attachment=att)
             try:
-                os.remove(shot_path)
-            except Exception:
-                pass
+                att = vk.upload_photo(user_id, shot_path)
+                kb = get_main_keyboard(config.is_voice_enabled())
+                vk.send_message(user_id, "📸 Снимок экрана рабочего стола ПК:", keyboard=kb, attachment=att)
+            except Exception as e:
+                kb = get_main_keyboard(config.is_voice_enabled())
+                vk.send_message(user_id, f"⚠️ Не удалось загрузить снимок экрана: {e}", keyboard=kb)
+            finally:
+                try:
+                    os.remove(shot_path)
+                except Exception:
+                    pass
         else:
             vk.send_message(user_id, "❌ Не удалось сделать снимок экрана.")
         return True
@@ -140,10 +145,7 @@ def process_message(msg: dict):
 
     # Forward to IDE and mirror
     print(f"\n=======================================================\n📥 VK INCOMING From user {user_id}:\n    {text}\n=======================================================\n", flush=True)
-
-    # Initial acknowledgement
-    kb = get_main_keyboard(config.is_voice_enabled())
-    vk.send_message(user_id, "🤖 Принято в работу! Передаю в Antigravity IDE...", keyboard=kb)
+    vk.set_activity(user_id, "typing")
 
 def run_longpoll():
     print("🚀 Antigravity IDE VK Bridge daemon starting...", flush=True)
