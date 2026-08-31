@@ -146,6 +146,22 @@ def process_message(msg: dict):
     # Forward to IDE and mirror
     print(f"\n=======================================================\n📥 VK INCOMING From user {user_id}:\n    {text}\n=======================================================\n", flush=True)
     vk.set_activity(user_id, "typing")
+    
+    # Push to unified IDE Queue and trigger receiver
+    try:
+        from queue_manager import push_message, trigger_ide_receiver
+        payload = {
+            "source": "VK",
+            "chat_id": user_id,
+            "user_id": user_id,
+            "user": f"vk_id{user_id}",
+            "text": text,
+            "timestamp": time.time()
+        }
+        push_message(payload)
+        trigger_ide_receiver()
+    except Exception as e:
+        print(f"[VK Queue Error] {e}", file=sys.stderr)
 
 def run_longpoll():
     print("🚀 Antigravity IDE VK Bridge daemon starting...", flush=True)
