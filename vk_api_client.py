@@ -64,6 +64,23 @@ def mark_as_read(peer_id: int, start_message_id: int = None):
     except Exception:
         pass
 
+def verify_message_delivered(msg_id: int, expect_attachment: str = None) -> bool:
+    """Verifies that a message was truly recorded and delivered on VK servers with expected attachments."""
+    try:
+        res = call_api("messages.getById", {"message_ids": msg_id})
+        items = res.get("items", [])
+        if not items:
+            return False
+        msg = items[0]
+        if expect_attachment:
+            attachments = msg.get("attachments", [])
+            types = [a.get("type") for a in attachments]
+            if expect_attachment not in types:
+                return False
+        return True
+    except Exception:
+        return False
+
 def upload_photo(user_id: int, photo_path: str) -> str:
     """Uploads a photo to VK messages server and returns attachment string 'photo{owner_id}_{id}'"""
     upload_server = call_api("photos.getMessagesUploadServer", {"peer_id": user_id})

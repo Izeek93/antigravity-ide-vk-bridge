@@ -8,18 +8,29 @@ from voice_engine import synthesize_voice
 
 def send_message_to_user(user_id: int, text: str):
     kb = get_main_keyboard(config.is_voice_enabled())
-    return vk.send_message(user_id, format_for_vk(text), keyboard=kb)
+    msg_id = vk.send_message(user_id, format_for_vk(text), keyboard=kb)
+    if msg_id and isinstance(msg_id, int):
+        vk.verify_message_delivered(msg_id)
+    return msg_id
 
 def send_voice_to_user(user_id: int, voice_path: str):
     att = vk.upload_audiomessage(user_id, voice_path)
     kb = get_main_keyboard(config.is_voice_enabled())
-    return vk.send_message(user_id, "", keyboard=kb, attachment=att)
+    msg_id = vk.send_message(user_id, "", keyboard=kb, attachment=att)
+    if msg_id and isinstance(msg_id, int):
+        verified = vk.verify_message_delivered(msg_id, expect_attachment="audio_message")
+        if not verified:
+            print(f"[Warning] Voice message {msg_id} was not verified with audio_message attachment on VK!", file=sys.stderr)
+    return msg_id
 
 def send_document_to_user(user_id: int, file_path: str, caption: str = ""):
     att = vk.upload_document(user_id, file_path)
     kb = get_main_keyboard(config.is_voice_enabled())
     formatted = format_for_vk(caption) if caption else ""
-    return vk.send_message(user_id, formatted, keyboard=kb, attachment=att)
+    msg_id = vk.send_message(user_id, formatted, keyboard=kb, attachment=att)
+    if msg_id and isinstance(msg_id, int):
+        vk.verify_message_delivered(msg_id, expect_attachment="doc")
+    return msg_id
 
 def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = None):
     # 1. If voice is enabled, synthesize and deliver audio message first (VK drops audio_message if text is passed)
