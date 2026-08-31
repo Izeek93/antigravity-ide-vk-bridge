@@ -101,21 +101,25 @@ def handle_command(user_id: int, text: str) -> bool:
         vk.send_message(user_id, format_for_vk(report), keyboard=kb)
         return True
 
-    if cmd.startswith("/voice") or "голос" in cmd:
+    voice_toggle_commands = {
+        "/voice", "/voice on", "/voice off",
+        "голос", "голос вкл", "голос выкл", "голос on", "голос off",
+        "🎙 голос: вкл", "🔇 голос: выкл", "вкл голос", "выкл голос",
+        "голос: вкл", "голос: выкл", "голос: включено", "голос: выключено"
+    }
+    if cmd in voice_toggle_commands or cmd.startswith("/voice "):
         current = config.is_voice_enabled()
-        # Handle button clicks
         if cmd in ("🎙 голос: вкл", "голос: вкл", "голос вкл", "голос: включено", "вкл голос"):
             new_state = False if current else True
-            # If button says ВКЛ, user clicked it to switch OFF
             if "вкл" in cmd and current:
                 new_state = False
             elif "выкл" in cmd and not current:
                 new_state = True
         elif cmd in ("🔇 голос: выкл", "голос: выкл", "голос выкл", "голос: выключено", "выкл голос"):
             new_state = True
-        elif "/voice on" in cmd or cmd == "голос on":
+        elif cmd in ("/voice on", "голос on"):
             new_state = True
-        elif "/voice off" in cmd or cmd == "голос off":
+        elif cmd in ("/voice off", "голос off"):
             new_state = False
         else:
             new_state = not current
