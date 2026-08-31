@@ -188,6 +188,11 @@ def run_longpoll():
 
         except Exception as e:
             print(f"⚠️ LongPoll error: {e}. Reconnecting in 5s...", flush=True)
+            try:
+                from incident_manager import report_bridge_incident
+                report_bridge_incident("VK_BRIDGE", str(e))
+            except Exception:
+                pass
             time.sleep(5)
 
 if __name__ == "__main__":
