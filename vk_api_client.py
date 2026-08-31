@@ -127,3 +127,42 @@ def upload_audiomessage(user_id: int, audio_path: str) -> str:
     })
     audio_doc = save_resp.get("audio_message") or save_resp.get("doc", {})
     return f"doc{audio_doc['owner_id']}_{audio_doc['id']}"
+
+def upload_document(user_id: int, file_path: str, title: str = None) -> str:
+    """Uploads a generic document (.txt, .py, .log, .pdf, .zip) to VK messages and returns 'doc{owner_id}_{id}'"""
+    if not title:
+        title = os.path.basename(file_path)
+
+    upload_server = call_api("docs.getMessagesUploadServer", {
+        "peer_id": user_id,
+        "type": "doc"
+    })
+    upload_url = upload_server.get("upload_url")
+    if not upload_url:
+        raise RuntimeError("Failed to get docs upload server URL")
+
+    boundary = "----WebKitFormBoundary" + "".join([str(random.randint(0, 9)) for _ in range(16)])
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(file_path)}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    req = urllib.request.Request(upload_url, data=body)
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        upload_resp = json.loads(r.read().decode("utf-8"))
+
+    file_val = upload_resp.get("file")
+    if not file_val:
+        raise RuntimeError(f"VK docs upload server returned invalid file data: {upload_resp}")
+
+    save_resp = call_api("docs.save", {
+        "file": file_val,
+        "title": title
+    })
+    doc_obj = save_resp.get("doc", {})
+    return f"doc{doc_obj['owner_id']}_{doc_obj['id']}"
