@@ -37,7 +37,14 @@ def send_message(user_id: int, text: str, keyboard: dict = None, attachment: str
         params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
     if attachment:
         params["attachment"] = attachment
-    return call_api("messages.send", params)
+    try:
+        return call_api("messages.send", params)
+    except RuntimeError as e:
+        # If error 912 (bot capabilities disabled in community), retry without keyboard
+        if "912" in str(e) and keyboard:
+            params.pop("keyboard", None)
+            return call_api("messages.send", params)
+        raise
 
 def set_activity(user_id: int, activity_type: str = "typing"):
     try:
