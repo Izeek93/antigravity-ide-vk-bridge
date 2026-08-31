@@ -22,22 +22,22 @@ def send_document_to_user(user_id: int, file_path: str, caption: str = ""):
     return vk.send_message(user_id, formatted, keyboard=kb, attachment=att)
 
 def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = None):
-    # 1. Send text
-    send_message_to_user(user_id, text)
-    
-    # 2. Send voice if enabled
+    # 1. If voice is enabled, synthesize and send voice FIRST or together
     if config.is_voice_enabled():
         vk.set_activity(user_id, "audiomessage")
         speech = voice_text if voice_text else text
         out_ogg = os.path.join(os.path.dirname(__file__), "media", f"vk_reply_{user_id}.ogg")
         os.makedirs(os.path.dirname(out_ogg), exist_ok=True)
         synthesize_voice(speech, out_ogg)
-        if os.path.exists(out_ogg):
+        if os.path.exists(out_ogg) and os.path.getsize(out_ogg) > 0:
             send_voice_to_user(user_id, out_ogg)
             try:
                 os.remove(out_ogg)
             except Exception:
                 pass
+
+    # 2. Send text message
+    send_message_to_user(user_id, text)
 
 if __name__ == "__main__":
     if len(sys.argv) > 2:
