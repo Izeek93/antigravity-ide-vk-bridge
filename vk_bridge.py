@@ -132,14 +132,42 @@ def handle_command(user_id: int, text: str) -> bool:
 
     return False
 
+import threading
+
+active_heartbeats = {}
+
+def start_typing_heartbeat(user_id: int, duration_sec: float = 45.0):
+    stop_typing_heartbeat(user_id)
+    stop_event = threading.Event()
+    active_heartbeats[user_id] = stop_event
+
+    def heartbeat_worker():
+        start_time = time.time()
+        while not stop_event.is_set() and time.time() - start_time < duration_sec:
+            act = "audiomessage" if config.is_voice_enabled() else "typing"
+            vk.set_activity(user_id, act)
+            stop_event.wait(4.0)
+
+    t = threading.Thread(target=heartbeat_worker, daemon=True)
+    t.start()
+
+def stop_typing_heartbeat(user_id: int):
+    if user_id in active_heartbeats:
+        active_heartbeats[user_id].set()
+        active_heartbeats.pop(user_id, None)
+
 def process_message(msg: dict):
     user_id = msg.get("from_id", msg.get("user_id"))
     text = msg.get("text", "")
     attachments = msg.get("attachments", [])
+    msg_id = msg.get("id") or msg.get("conversation_message_id")
     
     if not config.is_user_allowed(user_id):
         vk.send_message(user_id, "🔒 Доступ ограничен. Этот бот настроен в приватном режиме.")
         return
+
+    # Instant mark as read in first 50ms
+    vk.mark_as_read(user_id, msg_id)
 
     # Handle voice/audio messages
     for att in attachments:
@@ -190,7 +218,9 @@ def process_message(msg: dict):
 
     # Forward to IDE and mirror
     print(f"\n=======================================================\n📥 VK INCOMING From user {user_id}:\n    {text}\n=======================================================\n", flush=True)
-    vk.set_activity(user_id, "typing")
+    
+    # Start live typing / audiomessage heartbeat for continuous feedback
+    start_typing_heartbeat(user_id)
     
     # Push to unified IDE Queue and trigger receiver
     try:

@@ -55,6 +55,15 @@ def set_activity(user_id: int, activity_type: str = "typing"):
     except Exception:
         pass
 
+def mark_as_read(peer_id: int, start_message_id: int = None):
+    try:
+        params = {"peer_id": peer_id}
+        if start_message_id:
+            params["start_message_id"] = start_message_id
+        call_api("messages.markAsRead", params)
+    except Exception:
+        pass
+
 def upload_photo(user_id: int, photo_path: str) -> str:
     """Uploads a photo to VK messages server and returns attachment string 'photo{owner_id}_{id}'"""
     upload_server = call_api("photos.getMessagesUploadServer", {"peer_id": user_id})
