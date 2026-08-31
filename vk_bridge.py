@@ -32,6 +32,38 @@ GROUP_ID = 149687922
 
 def handle_command(user_id: int, text: str) -> bool:
     cmd = text.strip().lower()
+
+    # Remote approval handler for interactive IDE requests
+    APPROVAL_AFFIRMATIVE = {"да", "подтверждаю", "разрешаю", "ок", "выполняй", "approve", "/approve", "/yes", "1"}
+    APPROVAL_NEGATIVE = {"нет", "отмена", "отклонить", "не надо", "reject", "/reject", "/no", "0"}
+    if cmd in APPROVAL_AFFIRMATIVE or cmd in APPROVAL_NEGATIVE:
+        try:
+            shared_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "shared_ai"))
+            if shared_dir not in sys.path:
+                sys.path.insert(0, shared_dir)
+            from remote_approval_manager import get_pending_approval, resolve_approval
+            pending = get_pending_approval()
+            if pending:
+                decision = cmd in APPROVAL_AFFIRMATIVE
+                resolve_approval(decision)
+                res_str = "✅ Действие подтверждено! Передано в IDE на исполнение." if decision else "❌ Действие отклонено. Отменено в IDE."
+                kb = get_main_keyboard(config.is_voice_enabled())
+                vk.send_message(user_id, res_str, keyboard=kb)
+                from queue_manager import push_message, trigger_ide_receiver
+                push_message({
+                    "source": "REMOTE_APPROVAL",
+                    "chat_id": user_id,
+                    "user_id": user_id,
+                    "user": f"vk_id{user_id}",
+                    "action": pending.get("action"),
+                    "approved": decision,
+                    "text": f"[{'✅ ПОДТВЕРЖДЕНО' if decision else '❌ ОТКЛОНЕНО'} через VK]: «{pending.get('action')}»",
+                    "timestamp": time.time()
+                })
+                trigger_ide_receiver()
+                return True
+        except Exception as e:
+            print(f"[Remote Approval Error VK] {e}", file=sys.stderr)
     
     if cmd in ("/start", "/help", "помощь", "ℹ️ помощь"):
         help_text = (
