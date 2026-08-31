@@ -103,12 +103,23 @@ def handle_command(user_id: int, text: str) -> bool:
 
     if cmd.startswith("/voice") or "голос" in cmd:
         current = config.is_voice_enabled()
-        if "on" in cmd or "вкл" in cmd:
+        # Handle button clicks
+        if cmd in ("🎙 голос: вкл", "голос: вкл", "голос вкл", "голос: включено", "вкл голос"):
+            new_state = False if current else True
+            # If button says ВКЛ, user clicked it to switch OFF
+            if "вкл" in cmd and current:
+                new_state = False
+            elif "выкл" in cmd and not current:
+                new_state = True
+        elif cmd in ("🔇 голос: выкл", "голос: выкл", "голос выкл", "голос: выключено", "выкл голос"):
             new_state = True
-        elif "off" in cmd or "выкл" in cmd:
+        elif "/voice on" in cmd or cmd == "голос on":
+            new_state = True
+        elif "/voice off" in cmd or cmd == "голос off":
             new_state = False
         else:
             new_state = not current
+
         config.set_voice_enabled(new_state)
         status_str = "ВКЛЮЧЕНО 🎙" if new_state else "ВЫКЛЮЧЕНО 🔇"
         kb = get_main_keyboard(new_state)
