@@ -34,8 +34,14 @@ def handle_command(user_id: int, text: str) -> bool:
     cmd = text.strip().lower()
 
     # Remote approval handler for interactive IDE requests
-    APPROVAL_AFFIRMATIVE = {"да", "подтверждаю", "разрешаю", "ок", "выполняй", "approve", "/approve", "/yes", "1"}
-    APPROVAL_NEGATIVE = {"нет", "отмена", "отклонить", "не надо", "reject", "/reject", "/no", "0"}
+    APPROVAL_AFFIRMATIVE = {
+        "да", "подтверждаю", "разрешаю", "ок", "выполняй", "approve", "/approve", "/yes", "1",
+        "✅ подтвердить", "подтвердить", "✅ да", "подтверждаю действие"
+    }
+    APPROVAL_NEGATIVE = {
+        "нет", "отмена", "отклонить", "не надо", "reject", "/reject", "/no", "0",
+        "❌ отклонить", "отклонить", "❌ нет", "отменить"
+    }
     if cmd in APPROVAL_AFFIRMATIVE or cmd in APPROVAL_NEGATIVE:
         try:
             shared_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "shared_ai"))
