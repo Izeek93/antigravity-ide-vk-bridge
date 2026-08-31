@@ -10,11 +10,10 @@ def send_message_to_user(user_id: int, text: str):
     kb = get_main_keyboard(config.is_voice_enabled())
     return vk.send_message(user_id, format_for_vk(text), keyboard=kb)
 
-def send_voice_to_user(user_id: int, voice_path: str, caption: str = ""):
+def send_voice_to_user(user_id: int, voice_path: str):
     att = vk.upload_audiomessage(user_id, voice_path)
     kb = get_main_keyboard(config.is_voice_enabled())
-    formatted = format_for_vk(caption) if caption else ""
-    return vk.send_message(user_id, formatted, keyboard=kb, attachment=att)
+    return vk.send_message(user_id, "", keyboard=kb, attachment=att)
 
 def send_document_to_user(user_id: int, file_path: str, caption: str = ""):
     att = vk.upload_document(user_id, file_path)
@@ -23,7 +22,7 @@ def send_document_to_user(user_id: int, file_path: str, caption: str = ""):
     return vk.send_message(user_id, formatted, keyboard=kb, attachment=att)
 
 def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = None):
-    # If voice is enabled, attach voice note directly to the text in ONE single message
+    # 1. If voice is enabled, synthesize and deliver audio message first (VK drops audio_message if text is passed)
     if config.is_voice_enabled():
         vk.set_activity(user_id, "audiomessage")
         speech = voice_text if voice_text else text
@@ -32,14 +31,14 @@ def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = No
         synthesize_voice(speech, out_ogg)
         if os.path.exists(out_ogg) and os.path.getsize(out_ogg) > 0:
             try:
-                return send_voice_to_user(user_id, out_ogg, caption=text)
+                send_voice_to_user(user_id, out_ogg)
             finally:
                 try:
                     os.remove(out_ogg)
                 except Exception:
                     pass
 
-    # If voice disabled or synthesis fallback, send text message
+    # 2. Deliver text message
     return send_message_to_user(user_id, text)
 
 if __name__ == "__main__":
