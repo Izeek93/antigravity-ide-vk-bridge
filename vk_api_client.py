@@ -121,38 +121,50 @@ def upload_photo(user_id: int, photo_path: str) -> str:
 
 def upload_audiomessage(user_id: int, audio_path: str) -> str:
     """Uploads voice note (audiomessage / doc) to VK messages server and returns 'doc{owner_id}_{id}'"""
-    upload_server = call_api("docs.getMessagesUploadServer", {
-        "peer_id": user_id,
-        "type": "audio_message"
-    })
-    upload_url = upload_server.get("upload_url")
-    if not upload_url:
-        raise RuntimeError("Failed to get docs upload server URL")
+    for attempt in range(3):
+        upload_server = call_api("docs.getMessagesUploadServer", {
+            "peer_id": user_id,
+            "type": "audio_message"
+        })
+        upload_url = upload_server.get("upload_url")
+        if not upload_url:
+            if attempt == 2:
+                raise RuntimeError("Failed to get docs upload server URL")
+            time.sleep(1)
+            continue
 
-    boundary = "----WebKitFormBoundary" + "".join([str(random.randint(0, 9)) for _ in range(16)])
-    with open(audio_path, "rb") as f:
-        file_bytes = f.read()
+        boundary = "----WebKitFormBoundary" + "".join([str(random.randint(0, 9)) for _ in range(16)])
+        with open(audio_path, "rb") as f:
+            file_bytes = f.read()
 
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(audio_path)}"\r\n'
-        f"Content-Type: audio/ogg\r\n\r\n"
-    ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(audio_path)}"\r\n'
+            f"Content-Type: audio/ogg\r\n\r\n"
+        ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
 
-    req = urllib.request.Request(upload_url, data=body)
-    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        upload_resp = json.loads(r.read().decode("utf-8"))
-
-    file_val = upload_resp.get("file")
-    if not file_val:
-        raise RuntimeError(f"VK docs upload server returned invalid file data: {upload_resp}")
-
-    save_resp = call_api("docs.save", {
-        "file": file_val
-    })
-    audio_doc = save_resp.get("audio_message") or save_resp.get("doc", {})
-    return f"doc{audio_doc['owner_id']}_{audio_doc['id']}"
+        req = urllib.request.Request(upload_url, data=body)
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                upload_resp = json.loads(r.read().decode("utf-8"))
+            file_val = upload_resp.get("file")
+            if file_val:
+                save_resp = call_api("docs.save", {
+                    "file": file_val
+                })
+                audio_doc = save_resp.get("audio_message") or save_resp.get("doc", {})
+                return f"doc{audio_doc['owner_id']}_{audio_doc['id']}"
+            elif attempt < 2:
+                time.sleep(1)
+                continue
+            else:
+                raise RuntimeError(f"VK docs upload server returned invalid file data: {upload_resp}")
+        except Exception as e:
+            if attempt == 2:
+                raise
+            time.sleep(1)
+            continue
 
 def upload_document(user_id: int, file_path: str, title: str = None) -> str:
     """Uploads a generic document (.txt, .py, .log, .pdf, .zip) to VK messages and returns 'doc{owner_id}_{id}'"""

@@ -18,7 +18,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_context_usage():
     try:
-        brain_dir = r"C:\Users\Mavis\.gemini\antigravity-ide\brain"
+        brain_dir = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-ide", "brain")
         if not os.path.exists(brain_dir):
             return None
         conv_dirs = [os.path.join(brain_dir, d) for d in os.listdir(brain_dir) if os.path.isdir(os.path.join(brain_dir, d))]

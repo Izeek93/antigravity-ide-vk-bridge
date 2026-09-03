@@ -1,60 +1,53 @@
+"""
+vk-bot/queue_manager.py
+========================
+Потокобезопасная автономная FIFO-очередь сообщений через inbox.json.
+Использует portalocker для надёжной OS-level блокировки файлов
+(без внешних зависимостей от других проектов).
+"""
+
 import os
 import json
-import time
-import urllib.request
+import portalocker
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SHARED_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "tg-bot"))
-INBOX_FILE = os.path.join(SHARED_DIR, "inbox.json")
-LOCK_FILE = os.path.join(SHARED_DIR, "inbox.lock")
-RECEIVER_URL = "http://127.0.0.1:8080"
+INBOX_FILE = os.path.join(BASE_DIR, "inbox.json")
+LOCK_FILE = os.path.join(BASE_DIR, "inbox.lock")
 
-def _acquire_lock(timeout=2.0):
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            os.close(fd)
-            return True
-        except FileExistsError:
-            time.sleep(0.02)
-        except Exception:
-            return True
-    return False
 
-def _release_lock():
+def _read_inbox() -> list:
+    """Читает текущее содержимое inbox.json (вызывать под локом)."""
+    if not os.path.exists(INBOX_FILE):
+        return []
     try:
-        if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
-    except Exception:
+        with open(INBOX_FILE, "r", encoding="utf-8") as f:
+            content = json.load(f)
+            if isinstance(content, list):
+                return content
+            if isinstance(content, dict):
+                return [content]
+    except (json.JSONDecodeError, ValueError, OSError):
         pass
+    return []
+
+
+def _write_inbox(messages: list):
+    """Атомарно записывает список сообщений в inbox.json (вызывать под локом)."""
+    with open(INBOX_FILE, "w", encoding="utf-8") as f:
+        json.dump(messages, f, ensure_ascii=False, indent=2)
+
 
 def push_message(msg_data: dict):
-    _acquire_lock()
-    try:
-        messages = []
-        if os.path.exists(INBOX_FILE):
-            try:
-                with open(INBOX_FILE, "r", encoding="utf-8") as f:
-                    content = json.load(f)
-                    if isinstance(content, list):
-                        messages = content
-                    elif isinstance(content, dict):
-                        messages = [content]
-            except Exception:
-                messages = []
-                
+    """Добавляет сообщение в конец очереди с OS-level блокировкой."""
+    with portalocker.Lock(LOCK_FILE, timeout=5, fail_when_locked=False):
+        messages = _read_inbox()
         messages.append(msg_data)
-        
-        with open(INBOX_FILE, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
-    finally:
-        _release_lock()
+        _write_inbox(messages)
 
-def trigger_ide_receiver():
-    try:
-        req = urllib.request.Request(RECEIVER_URL, data=b'{"action":"new_message"}')
-        with urllib.request.urlopen(req, timeout=1):
-            pass
-    except Exception:
-        pass
+
+def pop_messages() -> list:
+    """Извлекает и очищает все сообщения из очереди с OS-level блокировкой."""
+    with portalocker.Lock(LOCK_FILE, timeout=5, fail_when_locked=False):
+        messages = _read_inbox()
+        _write_inbox([])
+        return messages

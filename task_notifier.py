@@ -15,7 +15,7 @@ def notify_task_finished(task_name: str, status: str = "SUCCESS", details: str =
     Sends an instant push notification to VK (and optionally Telegram) when a long-running IDE job completes.
     """
     if target_uid is None:
-        target_uid = list(config.VK_ALLOWED_USER_IDS)[0] if config.VK_ALLOWED_USER_IDS else 14901004
+        target_uid = send_vk.get_default_user_id()
 
     icon = "✅" if status.upper() == "SUCCESS" else "⚠️" if status.upper() == "WARNING" else "❌"
     
