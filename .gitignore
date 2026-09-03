@@ -1,15 +1,44 @@
+# Environment and secrets
 .env
 secrets.json
 voice_settings.json
+
+# Python bytecode and caches
 __pycache__/
-*.pyc
-media/
-*.ogg
-*.wav
-*.mp3
-*.png
-*.jpg
+*.py[cod]
+*$py.class
+
+# Virtual environments
 venv/
 .venv/
+env/
+.env/
+
+# Logs and runtime diagnostics
+*.log
+*.tmp
+tmp/
+downloads/
+media/
+local-voice-replies/
+incidents.json
+pending_approval.json
+
+# Queue and lock files
 inbox.json
+inbox.lock
 vk_inbox.json
+
+# Large AI model weights and binaries (>100 MB, GitHub limit)
+omnivoice-gguf/
+omnivoice-win64/
+*.gguf
+*.bin
+*.pt
+*.onnx
+
+# IDE and OS files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

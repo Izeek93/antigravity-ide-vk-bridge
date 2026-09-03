@@ -41,38 +41,113 @@ def clean_and_normalize_for_speech(text: str) -> str:
     for pattern, replacement in PHONETIC_REPLACEMENTS.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         
-    # 3. Clean multiple spaces
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    # 3. Clean multiple spaces but preserve explicit paragraphs
+    text = text.replace("…", "...")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([,.;:!?])([^\s\n,.;:!?])", r"\1 \2", text)
+    text = text.strip()
+    
+    # 4. Split sentences to avoid overflowing the TTS model (max 170 chars per line)
+    def split_existing_sentences(t: str) -> list[str]:
+        rough = re.split(r"(?<=[.!?…])\s+|\n+", t)
+        return [part.strip() for part in rough if part.strip()]
+
+    def split_long_at_existing_commas(sentence: str, max_len: int) -> list[str]:
+        if len(sentence) <= max_len:
+            return [sentence]
+        parts = [p.strip() for p in sentence.split(",")]
+        if len(parts) <= 1:
+            return [sentence]
+        chunks = []
+        current = parts[0]
+        for part in parts[1:]:
+            candidate = f"{current}, {part}"
+            if len(candidate) > max_len and len(current) >= 40:
+                chunks.append(current.rstrip())
+                current = part
+            else:
+                current = candidate
+        if current:
+            chunks.append(current.rstrip())
+        return chunks
+
+    sentences = []
+    for sentence in split_existing_sentences(text):
+        sentences.extend(split_long_at_existing_commas(sentence, max_len=170))
+        
+    return "\n".join(sentences).strip()
 
 def synthesize_voice(text: str, output_path: str = "voice_reply.ogg") -> str:
     """
     Modular voice synthesis wrapper.
-    Attempts local OmniVoice / Edge-TTS with phonetic normalization.
+    Attempts local OmniVoice with phonetic normalization natively on Windows via omnivoice-tts.exe
     """
     clean_text = clean_and_normalize_for_speech(text)
     
     abs_out = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(abs_out), exist_ok=True)
     
-    # Run OmniVoice inside WSL if available with safe argument passing
+    # Paths for Windows native OmniVoice
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    app_exe = os.path.join(base_dir, r"omnivoice-win64\omnivoice-tts.exe")
+    model_path = os.path.join(base_dir, r"omnivoice-gguf\models\omnivoice-base-Q8_0.gguf")
+    codec_path = os.path.join(base_dir, r"omnivoice-gguf\models\omnivoice-tokenizer-Q8_0.gguf")
+    ref_wav = os.path.join(base_dir, r"voice-refs\eva-default-ref.wav")
+    ref_txt = os.path.join(base_dir, r"voice-refs\eva-default-ref.txt")
+    
+    tmp_wav = abs_out + ".tmp.wav"
+    tmp_post = abs_out + ".post.wav"
+    
+    # Run omnivoice-tts natively
     cmd = [
-        "wsl", "-d", "Ubuntu", "-e", "bash", "-c",
-        '~/.openclaw/workspace/skills/local-voice-replies/scripts/omnivoice_voice_reply.sh --channel telegram --text "$1"',
-        "bash",
-        clean_text
+        app_exe,
+        "--model", model_path,
+        "--codec", codec_path,
+        "--lang", "Russian",
+        "--instruct", "female, russian accent",
+        "--format", "wav16",
+        "--ref-wav", ref_wav,
+        "--ref-text", ref_txt,
+        "-o", tmp_wav
     ]
     
+    # Set backend to Vulkan0 to utilize the GPU without needing CUDA toolkit!
+    env = os.environ.copy()
+    env["GGML_BACKEND"] = "Vulkan0"
+    
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-        if result.returncode == 0:
-            lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
-            if lines and lines[-1].endswith(".ogg"):
-                wsl_ogg_path = lines[-1]
-                wsl_win_path = abs_out.replace("\\", "/").replace("C:", "/mnt/c")
-                copy_cmd = ["wsl", "-d", "Ubuntu", "-e", "cp", wsl_ogg_path, wsl_win_path]
-                subprocess.run(copy_cmd, check=True)
-                return abs_out
+        # Run inference
+        result = subprocess.run(cmd, input=clean_text, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=600)
+        
+        if result.returncode == 0 and os.path.exists(tmp_wav):
+            # Apply post processing (speed & pitch) via FFmpeg just like in the bash script
+            # speed 1.1, pitch 1.04 => atempo = 1.1 / 1.04 = 1.0576923
+            atempo = 1.1 / 1.04
+            ffmpeg_post = [
+                "ffmpeg", "-nostdin", "-y", "-i", tmp_wav,
+                "-filter:a", f"asetrate=24000*1.04,aresample=24000,atempo={atempo:.8g}",
+                "-ar", "24000", "-ac", "1", tmp_post
+            ]
+            subprocess.run(ffmpeg_post, capture_output=True, check=True)
+            
+            # Convert to final Opus OGG format
+            ffmpeg_final = [
+                "ffmpeg", "-nostdin", "-y", "-i", tmp_post,
+                "-ar", "48000", "-ac", "1", "-c:a", "libopus", "-b:a", "64k", abs_out
+            ]
+            subprocess.run(ffmpeg_final, capture_output=True, check=True)
+            
+            # Cleanup temp wavs
+            try:
+                os.remove(tmp_wav)
+                os.remove(tmp_post)
+            except Exception:
+                pass
+                
+            return abs_out
         else:
             print(f"[voice_engine error] returncode {result.returncode}: {result.stderr}", file=sys.stderr)
     except Exception as e:

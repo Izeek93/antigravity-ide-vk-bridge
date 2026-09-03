@@ -1,4 +1,10 @@
-import subprocess
+"""
+vk-bot/local_stt.py
+===================
+Локальный движок распознавания речи (STT) для VK моста на базе Faster-Whisper.
+Работает 100% нативно на Windows (CUDA / CPU) без использования внешних подсистем и WSL.
+"""
+
 import os
 import sys
 
@@ -14,61 +20,42 @@ def _get_direct_whisper_model(model_size: str = "large-v3-turbo"):
     global _cached_model
     if _cached_model is not None:
         return _cached_model
-        
-    import torch
+
+    try:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if torch.cuda.is_available() else "int8"
+    except Exception:
+        device = "cpu"
+        compute_type = "int8"
+
     from faster_whisper import WhisperModel
-    
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    compute_type = "float16" if torch.cuda.is_available() else "int8"
-    
     print(f"[STT] Initializing Faster-Whisper ({model_size}) on {device} ({compute_type})...")
     _cached_model = WhisperModel(model_size, device=device, compute_type=compute_type)
     return _cached_model
 
-def transcribe_local_whisper(audio_path: str, model_size: str = "large-v3-turbo") -> str:
-    abs_audio = os.path.abspath(audio_path)
-    
-    # TIER 1: Try Primary Custom WSL Whisper GPU script (User's primary setup)
-    try:
-        wsl_audio_path = abs_audio.replace("\\", "/").replace("C:", "/mnt/c")
-        script = f"""
-import sys
-from faster_whisper import WhisperModel
 
-path = "{wsl_audio_path}"
-model = WhisperModel("{model_size}", device="cuda", compute_type="float16")
-segments, info = model.transcribe(path, language="ru", beam_size=5)
-full_text = " ".join([s.text.strip() for s in segments])
-print("RESULT:" + full_text)
-"""
-        cmd = [
-            "wsl", "-d", "Ubuntu", "-e", "bash", "-c",
-            f"~/.openclaw/workspace/scripts/run-whisper-gpu.sh - <<'PY'\n{script}\nPY"
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-        if result.returncode == 0:
-            for line in result.stdout.split("\n"):
-                if line.startswith("RESULT:"):
-                    return line.replace("RESULT:", "").strip()
-            if result.stdout.strip():
-                return result.stdout.strip()
-    except Exception as e:
-        print(f"[STT Warning] Primary WSL Whisper unavailable, falling back to Direct Faster-Whisper: {e}", file=sys.stderr)
-        
-    # TIER 2: Direct In-Process Faster-Whisper (Universal Fallback for any PC)
+def transcribe_local_whisper(audio_path: str, model_size: str = "large-v3-turbo") -> str:
+    """Локальная транскрибация аудиофайла через Faster-Whisper."""
+    abs_audio = os.path.abspath(audio_path)
+    if not os.path.exists(abs_audio):
+        raise FileNotFoundError(f"Audio file not found: {abs_audio}")
+
     try:
         model = _get_direct_whisper_model(model_size)
         segments, info = model.transcribe(abs_audio, language="ru", beam_size=5)
         full_text = " ".join([s.text.strip() for s in segments]).strip()
         return full_text
     except Exception as e:
-        print(f"[STT Error] Direct Faster-Whisper failed: {e}", file=sys.stderr)
-        raise RuntimeError(f"All STT methods failed: {e}")
+        print(f"[STT Error] Faster-Whisper failed: {e}", file=sys.stderr)
+        raise RuntimeError(f"STT transcription failed: {e}")
+
 
 if __name__ == "__main__":
-    test_files = [f for f in os.listdir(".") if f.startswith("voice_") and f.endswith(".ogg")]
-    if test_files:
-        sample = test_files[0]
-        print(f"Testing cascade STT on {sample}...")
+    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+        sample = sys.argv[1]
+        print(f"Testing local STT on {sample}...")
         res = transcribe_local_whisper(sample)
         print(f"Result: {res}")
+    else:
+        print("Usage: python local_stt.py <path_to_audio_file>")

@@ -10,6 +10,8 @@ SETTINGS_PATH = BASE_DIR / "voice_settings.json"
 load_dotenv(dotenv_path=ENV_PATH)
 
 VK_GROUP_TOKEN = os.getenv("VK_GROUP_TOKEN", "").strip()
+_raw_gid = os.getenv("VK_GROUP_ID", "").strip()
+VK_GROUP_ID = int(_raw_gid) if _raw_gid.isdigit() else 0
 VK_API_VERSION = "5.199"
 
 # User whitelist
@@ -23,18 +25,11 @@ if _raw_allowed:
 
 def is_user_allowed(user_id: int) -> bool:
     if not VK_ALLOWED_USER_IDS:
-        # Auto-whitelist first user
-        VK_ALLOWED_USER_IDS.add(user_id)
-        save_allowed_users()
-        return True
+        return True  # If no whitelist configured, allow all
     return user_id in VK_ALLOWED_USER_IDS
 
 def add_allowed_user(user_id: int):
     VK_ALLOWED_USER_IDS.add(user_id)
-    save_allowed_users()
-
-def save_allowed_users():
-    pass
 
 def is_voice_enabled() -> bool:
     if SETTINGS_PATH.exists():
