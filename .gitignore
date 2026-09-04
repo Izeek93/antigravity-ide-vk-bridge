@@ -24,12 +24,18 @@ local-voice-replies/
 incidents.json
 pending_approval.json
 
-# Queue and lock files
+# Queue, lock and supervisor runtime files
 inbox.json
 inbox.lock
 vk_inbox.json
 active_status.json
 models_quota.json
+supervisor.pid
+supervisor_status.json
+*.html
+*.jpg
+parse_*.py
+inspect_*.py
 
 # Ephemeral media and scratch scripts
 *.ogg

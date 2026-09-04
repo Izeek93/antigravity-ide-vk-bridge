@@ -6,12 +6,21 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![CUDA Acceleration](https://img.shields.io/badge/CUDA-Enabled-76B900.svg?style=flat&logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-zone)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue.svg?style=flat)](https://github.com/)
-[![Version](https://img.shields.io/badge/release-v1.1.0--Decoupled-green.svg?style=flat)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/release-v1.2.0--Supervisor--MCP-green.svg?style=flat)](CHANGELOG.md)
+[![Roadmap](https://img.shields.io/badge/roadmap-2026-orange.svg?style=flat)](ROADMAP.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-**Antigravity IDE VK Bridge** — это полностью автономная система двусторонней синхронизации активной сессии разработчика в **Antigravity IDE** с социальной сетью **ВКонтакте** (VK Community Bots LongPoll API). Включает голосовой ввод/вывод (STT/TTS), мониторинг квот и процессов IDE, захват экрана ПК и потокобезопасную локальную очередь сообщений.
+**Antigravity IDE VK Bridge & MCP** — это полностью автономная система двусторонней синхронизации активной сессии разработчика в **Antigravity IDE** с социальной сетью **ВКонтакте** (VK Community Bots LongPoll API). 
+
+Включает:
+- 🛡️ **Self-Healing Watchdog Supervisor** (`bridge_supervisor.py`) для мгновенного авто-рестарта при сетевых сбоях.
+- ⚡ **Stdio FastMCP Server** (`vk_mcp_server.py`) для нативного вызова функций VK агентом прямо из среды IDE.
+- 🎙️ Голосовой ввод/вывод (локальный Faster-Whisper STT + нейро-TTS OmniVoice Eva).
+- 📊 Терминальные статус-карточки, мониторинг токенов и квот IDE, захват экрана ПК и потокобезопасную очередь `portalocker`.
+
+Подробный план развития проекта см. в [ROADMAP.md](ROADMAP.md).
 
 </div>
 
