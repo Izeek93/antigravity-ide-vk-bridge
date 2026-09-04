@@ -31,6 +31,12 @@ def get_main_keyboard(voice_enabled: bool = True) -> dict:
                     "action": {"type": "text", "label": "ℹ️ Помощь", "payload": '{"command": "help"}'},
                     "color": "secondary"
                 }
+            ],
+            [
+                {
+                    "action": {"type": "text", "label": "🚨 SOS / Проверить логи", "payload": '{"command": "sos"}'},
+                    "color": "secondary"
+                }
             ]
         ]
     }

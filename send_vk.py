@@ -23,6 +23,8 @@ import vk_api_client as vk
 from vk_keyboard import get_main_keyboard
 from vk_formatter import format_for_vk
 from voice_engine import synthesize_voice
+import status_tracker
+from heartbeat_manager import stop_typing_heartbeat
 
 
 def get_default_user_id() -> int:
@@ -84,6 +86,7 @@ def send_message_to_user(user_id: int, text: str, attachment: str = None) -> lis
                 vk.verify_message_delivered(msg_id)
         time.sleep(0.1)
 
+    stop_typing_heartbeat(user_id)
     return msg_ids
 
 
@@ -99,15 +102,29 @@ def send_photo_to_user(user_id: int, photo_path: str, caption: str = "") -> int:
 
 
 def send_voice_to_user(user_id: int, voice_path: str) -> int:
-    """Загружает и отправляет аудиосообщение (voice note)."""
+    """Загружает и отправляет аудиосообщение (voice note) с авто-обновлением статус-трекера."""
     if not os.path.exists(voice_path):
         raise FileNotFoundError(f"Audio file not found: {voice_path}")
+
+    # Переводим статус в отправку
+    try:
+        status_tracker.update_step(user_id, "TTS", "done", desc="Голос готов")
+        status_tracker.update_step(user_id, "VK", "running", desc="Отправка в VK...")
+    except Exception:
+        pass
 
     att = vk.upload_audiomessage(user_id, voice_path)
     kb = get_main_keyboard(config.is_voice_enabled())
     msg_id = vk.send_message(user_id, "", keyboard=kb, attachment=att)
     if msg_id and isinstance(msg_id, int):
         vk.verify_message_delivered(msg_id, expect_attachment="audio_message")
+
+    # Успешно доставлено: финализируем карточку и гасим активность
+    try:
+        status_tracker.finish_tracking(user_id, final_log="Голосовой ответ доставлен.")
+    except Exception:
+        pass
+    stop_typing_heartbeat(user_id)
     return msg_id
 
 
@@ -125,18 +142,64 @@ def send_document_to_user(user_id: int, file_path: str, caption: str = "") -> in
     return msg_id
 
 
+def get_estimated_context_tokens() -> int:
+    """Оценивает честный объем активного контекста сессии IDE."""
+    base_prompt = 16500  # системный промпт, правила AGENTS.md, схемы 14 инструментов, скиллы
+    extra = 22500        # артефакты, память проекта, история ходов
+    try:
+        proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        f = os.path.join(proj_dir, "PROJECT_BANK_REFERRALS.md")
+        if os.path.exists(f):
+            extra += int(os.path.getsize(f) / 3.0)
+    except Exception:
+        pass
+    return base_prompt + extra
+
+
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    import re
+    cyrillic = len(re.findall(r'[\u0400-\u04FF]', text))
+    other = len(text) - cyrillic
+    return max(1, int(cyrillic / 2.5 + other / 3.8))
+
+
 def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = None):
     """Синтезирует голос (если включен) и отправляет ответ в диалог."""
+    ide_dur = None
+    try:
+        import status_tracker
+        trackers = status_tracker._load_trackers()
+        tracker = trackers.get(str(user_id))
+        if tracker:
+            ide_dur = round(time.time() - tracker.get("start_time", time.time()), 1)
+        status_tracker.update_step(user_id, "IDE", "done", desc="Анализ и код", duration=ide_dur)
+    except Exception:
+        pass
+
+    tts_duration = None
     if config.is_voice_enabled():
         vk.set_activity(user_id, "audiomessage")
         speech = voice_text if voice_text else text
         out_ogg = os.path.join(os.path.dirname(__file__), "media", f"vk_reply_{user_id}_{int(time.time())}.ogg")
         os.makedirs(os.path.dirname(out_ogg), exist_ok=True)
         try:
+            try:
+                import status_tracker
+                status_tracker.update_step(user_id, "TTS", "running", desc="Синтез OmniVoice (Eva)...", log_line="Inference Vulkan0 GGML backend")
+            except Exception:
+                pass
             tts_start = time.time()
             synthesize_voice(speech, out_ogg)
             tts_duration = round(time.time() - tts_start, 1)
             text += f"\n\n⏱ Генерация голоса (TTS): {tts_duration} сек."
+            try:
+                import status_tracker
+                status_tracker.update_step(user_id, "TTS", "done", desc="Синтез OmniVoice", duration=tts_duration)
+                status_tracker.update_step(user_id, "VK", "running", desc="Отправка в чат...", log_line="Uploading audio message to VK")
+            except Exception:
+                pass
             if os.path.exists(out_ogg) and os.path.getsize(out_ogg) > 0:
                 send_voice_to_user(user_id, out_ogg)
         except Exception as e:
@@ -148,7 +211,22 @@ def send_reply_with_optional_voice(user_id: int, text: str, voice_text: str = No
                 except Exception:
                     pass
 
-    return send_message_to_user(user_id, text)
+    vk_start = time.time()
+    res = send_message_to_user(user_id, text)
+    vk_dur = round(time.time() - vk_start, 1)
+
+    try:
+        import status_tracker
+        status_tracker.update_step(user_id, "VK", "done", desc="Доставлено в чат", duration=vk_dur)
+        # Подсчет входящих/исходящих токенов (честный контекст + дельта)
+        in_tok = estimate_tokens(voice_text or text)
+        out_tok = estimate_tokens(text) + 850  # с учетом блока рассуждений модели
+        ctx_tok = get_estimated_context_tokens()
+        status_tracker.set_tokens(user_id, in_tok, out_tok, context_tokens=ctx_tok)
+        status_tracker.finish_tracking(user_id, final_log="Все материалы успешно доставлены в диалог.")
+    except Exception:
+        pass
+    return res
 
 
 def main():
@@ -160,6 +238,8 @@ def main():
     parser.add_argument("--doc", help="Путь к документу")
     parser.add_argument("--caption", default="", help="Подпись к фото или документу")
     parser.add_argument("--action", help="Статус активности (typing, audiomessage, photo)")
+
+    args = parser.parse_args()
 
     try:
         user_id = args.user_id or get_default_user_id()
