@@ -33,14 +33,22 @@ def report_bridge_incident(service_name: str, error_msg: str, tb: str = None) ->
 
     # Write directly to local incidents.json
     incidents_file = os.path.join(os.path.dirname(__file__), "incidents.json")
+    lock_file = incidents_file + ".lock"
     try:
-        incidents = []
-        if os.path.exists(incidents_file):
-            with open(incidents_file, "r", encoding="utf-8") as f:
-                incidents = json.load(f)
-        incidents.append(incident_payload)
-        with open(incidents_file, "w", encoding="utf-8") as f:
-            json.dump(incidents, f, ensure_ascii=False, indent=2)
+        import portalocker
+        with portalocker.Lock(lock_file, timeout=5, fail_when_locked=False):
+            incidents = []
+            if os.path.exists(incidents_file):
+                try:
+                    with open(incidents_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            incidents = data
+                except Exception:
+                    incidents = []
+            incidents.append(incident_payload)
+            with open(incidents_file, "w", encoding="utf-8") as f:
+                json.dump(incidents, f, ensure_ascii=False, indent=2)
         return True
     except Exception:
         pass

@@ -25,12 +25,13 @@ from queue_manager import push_message
 
 APPROVAL_AFFIRMATIVE = {
     "да", "подтверждаю", "разрешаю", "ок", "выполняй", "approve", "/approve", "/yes", "1",
-    "✅ подтвердить", "подтвердить", "✅ да", "подтверждаю действие"
+    "✅ подтвердить", "подтвердить", "✅ да", "подтверждаю действие",
+    "✅ утвердить план", "утвердить план", "утвердить", "одобряю", "утверждаю", "✅ применить"
 }
 
 APPROVAL_NEGATIVE = {
     "нет", "отмена", "отклонить", "не надо", "reject", "/reject", "/no", "0",
-    "❌ отклонить", "отклонить", "❌ нет", "отменить"
+    "❌ отклонить", "отклонить", "❌ нет", "отменить", "доработать"
 }
 
 VOICE_TOGGLE_COMMANDS = {
@@ -42,7 +43,21 @@ VOICE_TOGGLE_COMMANDS = {
 
 
 def handle_remote_approval(user_id: int, cmd: str) -> bool:
-    """Обработка подтверждения/отклонения опасных команд в IDE."""
+    """Обработка подтверждения/отклонения опасных команд в IDE или паузы автопилота."""
+    # Экстренная пауза автопилота
+    if cmd in ("pause", "приостановить", "⏸ приостановить", "/pause"):
+        res_str = "⏸ Выполнение плана приостановлено! Агент в IDE остановлен. Напишите или наговорите голосом ваши замечания."
+        kb = get_main_keyboard(config.is_voice_enabled())
+        vk.send_message(user_id, res_str, keyboard=kb)
+        push_message({
+            "source": "VK_PAUSE",
+            "chat_id": user_id,
+            "user_id": user_id,
+            "text": "[USER_ACTION]: ⏸ Выполнение плана ПРИОСТАНОВЛЕНО пользователем через ВКонтакте. Ожидай новых указаний.",
+            "timestamp": time.time()
+        })
+        return True
+
     if cmd not in APPROVAL_AFFIRMATIVE and cmd not in APPROVAL_NEGATIVE:
         return False
 
@@ -101,6 +116,7 @@ def dispatch_command(user_id: int, raw_text: str) -> bool:
             "• 📸 Скриншот (/screen) — Снимок экрана рабочего стола\n"
             "• 📋 Задачи (/tasks) — Список фоновых задач и процессов\n"
             "• 🎙 Голос (/voice) — Включение/отключение голосовых ответов\n"
+            "• 👥 Команда (/team) — Статус ролей мультиагентной системы\n"
             "• 📊 Статус (/status) — Состояние подключения моста\n"
             "• ℹ️ Помощь (/help) — Список команд"
         )
@@ -188,6 +204,77 @@ def dispatch_command(user_id: int, raw_text: str) -> bool:
         state_str = "🔊 Голосовые ответы ВКЛЮЧЕНЫ." if new_state else "🔇 Голосовые ответы ВЫКЛЮЧЕНЫ."
         kb = get_main_keyboard(new_state)
         vk.send_message(user_id, state_str, keyboard=kb)
+        return True
+
+    # 8. Статус мультиагентной команды (AATC)
+    if cmd in ("/team", "команда", "агенты", "/agents"):
+        vk.set_activity(user_id, "typing")
+        team_info = (
+            "🤖 Мультиагентная система AATC (Antigravity Team Core)\n\n"
+            "Активные роли конвейера:\n"
+            "• 📐 Прораб (Architect): Спецификация и проектирование\n"
+            "• 💻 Кодер (Builder): Разработка и юнит-тесты\n"
+            "• 🔍 Зануда (Reviewer): Анти-самоприёмка и стресс-тесты\n"
+            "• 🛡 Инспектор (Auditor): Zero-Trust аудит безопасности\n"
+            "• 🚀 Выпускатель (Release): Контроль релизов и отчёты\n\n"
+            "⚡ Режим: Always-On Auto-Triage (Tier 0-2)"
+        )
+        kb = get_main_keyboard(config.is_voice_enabled())
+        vk.send_message(user_id, team_info, keyboard=kb)
+        return True
+
+    # 9. Еженедельная ретроспектива уроков AATC
+    if cmd in ("/retro", "/learnings", "ретро", "уроки"):
+        vk.set_activity(user_id, "typing")
+        try:
+            core_dir = Path(__file__).resolve().parent.parent / "agent-core"
+            if str(core_dir) not in sys.path:
+                sys.path.insert(0, str(core_dir))
+            import retro_manager
+            digest = retro_manager.generate_weekly_digest()
+            summary_text = digest.get("summary_text", "Уроков не найдено.")
+            
+            # Inline-кнопки согласования
+            inline_kb = {
+                "inline": True,
+                "buttons": [
+                    [
+                        {"action": {"type": "text", "label": "✅ Применить"}, "color": "positive"},
+                        {"action": {"type": "text", "label": "❌ Отклонить"}, "color": "negative"}
+                    ]
+                ]
+            }
+            vk.send_message(user_id, summary_text, keyboard=inline_kb)
+        except Exception as e:
+            vk.send_message(user_id, f"⚠️ Ошибка формирования ретроспективы: {e}")
+        return True
+
+    # 10. Управление режимом автопилота (Auto-Proceed)
+    if cmd in ("/auto", "/autopilot", "авто", "автопилот") or cmd.startswith("/auto ") or cmd.startswith("авто "):
+        vk.set_activity(user_id, "typing")
+        try:
+            core_dir = Path(__file__).resolve().parent.parent / "agent-core"
+            if str(core_dir) not in sys.path:
+                sys.path.insert(0, str(core_dir))
+            import config as core_config
+
+            parts = cmd.split()
+            arg = parts[1] if len(parts) > 1 else ""
+            if arg in ("on", "вкл", "1", "true"):
+                core_config.set_autopilot_enabled(True)
+                msg = "⚡ Режим Автопилота ВКЛЮЧЕН (по умолчанию).\n\nПланы принимаются сразу, исполнение начинается немедленно. В мост шлётся уведомление с кнопкой экстренной паузы."
+            elif arg in ("off", "выкл", "0", "false"):
+                core_config.set_autopilot_enabled(False)
+                msg = "🛡 Режим Строгого Контроля ВКЛЮЧЕН.\n\nАгент будет останавливаться на каждом плане и ждать вашего ручного утверждения кнопкой или голосом."
+            else:
+                current = core_config.is_autopilot_enabled()
+                state_str = "⚡ ВКЛЮЧЕН (Auto-Proceed)" if current else "🛡 ВЫКЛЮЧЕН (Строгий ручной контроль)"
+                msg = f"⚙️ Текущий режим планов: {state_str}\n\n• Включить автопилот: /auto on\n• Включить ручной контроль: /auto off"
+
+            kb = get_main_keyboard(config.is_voice_enabled())
+            vk.send_message(user_id, msg, keyboard=kb)
+        except Exception as e:
+            vk.send_message(user_id, f"⚠️ Ошибка настройки автопилота: {e}")
         return True
 
     return False

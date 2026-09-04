@@ -34,14 +34,44 @@ import vk_api_client as vk
 from command_router import dispatch_command
 from queue_manager import push_message
 from local_stt import transcribe_local_whisper
+import status_tracker
 
 GROUP_ID = config.VK_GROUP_ID
 MEDIA_DIR = os.path.join(os.path.dirname(__file__), "media")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
+def ensure_single_instance(script_name: str = "vk_bridge.py"):
+    """Гарантирует запуск строго одного экземпляра, принудительно завершая любые старые дубликаты."""
+    try:
+        import psutil
+        current_pid = os.getpid()
+        parent_pid = os.getppid()
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                pid = p.info["pid"]
+                if pid in (current_pid, parent_pid):
+                    continue
+                cmdline = p.info.get("cmdline") or []
+                is_target = any(arg.endswith(script_name) for arg in cmdline[1:])
+                if is_target and "python" in (p.info.get("name") or "").lower():
+                    print(f"⚠️ [SingleInstance] Found old running instance PID {pid}, terminating...", flush=True)
+                    p.terminate()
+                    try:
+                        p.wait(timeout=2)
+                    except psutil.TimeoutExpired:
+                        p.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception as e:
+        print(f"[SingleInstance Warning] {e}", file=sys.stderr)
+
+
+ensure_single_instance("vk_bridge.py")
+
+from heartbeat_manager import start_typing_heartbeat, stop_typing_heartbeat, stop_all_heartbeats
+
 _message_counter = 0
 _CLEANUP_INTERVAL = 50
-active_heartbeats = {}
 
 
 def cleanup_old_media(max_age_seconds: int = 86400):
@@ -59,32 +89,15 @@ def cleanup_old_media(max_age_seconds: int = 86400):
         pass
 
 
-def start_typing_heartbeat(user_id: int, duration_sec: float = 45.0):
-    """Фоновый пульс активности (typing / audiomessage) для обратной связи в VK."""
-    stop_typing_heartbeat(user_id)
-    stop_event = threading.Event()
-    active_heartbeats[user_id] = stop_event
-
-    def heartbeat_worker():
-        start_time = time.time()
-        while not stop_event.is_set() and (time.time() - start_time) < duration_sec:
-            act = "audiomessage" if config.is_voice_enabled() else "typing"
-            vk.set_activity(user_id, act)
-            stop_event.wait(4.0)
-
-    t = threading.Thread(target=heartbeat_worker, daemon=True)
-    t.start()
-
-
-def stop_typing_heartbeat(user_id: int):
-    """Остановка пульса активности."""
-    if user_id in active_heartbeats:
-        active_heartbeats[user_id].set()
-        active_heartbeats.pop(user_id, None)
-
-
 def process_message(msg: dict):
     """Обработка одного входящего сообщения от LongPoll сервера."""
+    import importlib
+    import status_tracker
+    try:
+        importlib.reload(status_tracker)
+    except Exception:
+        pass
+
     user_id = msg.get("from_id", msg.get("user_id"))
     text = (msg.get("text") or "").strip()
     attachments = msg.get("attachments", [])
@@ -97,12 +110,71 @@ def process_message(msg: dict):
     # Мгновенная отметка о прочтении
     vk.mark_as_read(user_id, msg_id)
 
+    # 🚨 Ранний перехват SOS в обход очереди FIFO
+    payload_raw = str(msg.get("payload") or "")
+    clean_txt = text.lower().strip()
+    is_sos_cmd = (
+        '"command":"sos"' in payload_raw.replace(" ", "")
+        or any(clean_txt == kw or clean_txt.startswith(kw) for kw in ["sos", "сос", "/sos", "/сос", "стоп", "сброс", "отмена", "🚨"])
+        or "проверить логи" in clean_txt
+    )
+    if is_sos_cmd:
+        try:
+            # 1. Принудительно завершаем любые зависшие тяжелые генерации
+            try:
+                import psutil
+                for p in psutil.process_iter(["name"]):
+                    p_name = (p.info.get("name") or "").lower()
+                    if any(target in p_name for target in ["omnivoice", "ffmpeg"]):
+                        p.kill()
+            except Exception:
+                pass
+
+            # 2. Немедленно гасим активность и сбрасываем залипшие статусы
+            stop_typing_heartbeat(user_id)
+            try:
+                import status_tracker
+                status_tracker.finish_tracking(user_id, final_log="Сброшено по экстренному сигналу SOS.")
+            except Exception:
+                pass
+
+            # 3. Регистрируем сигнал SOS
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            import sos_manager
+            sos_manager.trigger_sos("VK", user_id=user_id)
+
+            # 4. Передаем в очередь inbox.json, чтобы разбудить приёмник в IDE
+            push_message({
+                "source": "VK_SOS",
+                "chat_id": user_id,
+                "user_id": user_id,
+                "user": f"vk_id{user_id}",
+                "text": "🚨 [EMERGENCY SOS] Пользователь нажал кнопку SOS в VK. Задачи и процессы сброшены.",
+                "timestamp": time.time()
+            })
+
+            # 4. Отправляем пользователю мгновенный прозрачный отчёт
+            sos_reply = (
+                "🚨 Сигнал SOS успешно принят!\n\n"
+                "🛠 Автономная диагностика выполнена:\n"
+                "• Зависшие задачи и таймеры статуса принудительно сброшены.\n"
+                "• Индикатор активности («набирает сообщение») отключён.\n"
+                "• Соединение с VK LongPoll стабильно.\n"
+                "• Экстренное прерывание передано агенту в IDE.\n\n"
+                "💬 Вы можете отправить новое сообщение или голосовой запрос."
+            )
+            vk.send_message(user_id, sos_reply)
+        except Exception as e:
+            print(f"[SOS Error] {e}", file=sys.stderr)
+        return
+
     global _message_counter
     _message_counter += 1
     if _message_counter % _CLEANUP_INTERVAL == 0:
         cleanup_old_media()
 
     # Обработка вложений
+    stt_dur = None
     for att in attachments:
         att_type = att.get("type")
 
@@ -170,6 +242,18 @@ def process_message(msg: dict):
     print(f"\n📥 [VK INCOMING] User {user_id}: {text}\n", flush=True)
     start_typing_heartbeat(user_id)
 
+    # Инициализация терминального статус-трекера и реакция на входящее сообщение
+    try:
+        cmid = msg.get("conversation_message_id")
+        is_voice = any(att.get("type") == "audio_message" for att in attachments)
+        clean_title = text.replace("[🎙 Голосовое сообщение", "").strip()
+        if "]:" in clean_title:
+            clean_title = clean_title.split("]:", 1)[-1].strip()
+        clean_title = clean_title[:45] if clean_title else "Запрос"
+        status_tracker.start_tracking(user_id, task_name=clean_title, cmid=cmid, is_voice=is_voice, stt_duration=stt_dur)
+    except Exception as e:
+        print(f"[StatusTracker Init Error] {e}", file=sys.stderr)
+
     payload = {
         "source": "VK",
         "chat_id": user_id,
@@ -226,14 +310,15 @@ def run_longpoll():
 
         except Exception as e:
             consecutive_errors += 1
-            print(f"⚠️ LongPoll error ({consecutive_errors}/5): {e}. Reconnecting in 5s...", flush=True)
-            if consecutive_errors >= 5:
+            sleep_sec = min(30, 3 + consecutive_errors * 2)
+            print(f"⚠️ LongPoll error ({consecutive_errors}): {e}. Reconnecting in {sleep_sec}s...", flush=True)
+            if consecutive_errors == 5:
                 try:
                     from incident_manager import report_bridge_incident
                     report_bridge_incident("VK_BRIDGE", f"5 consecutive LongPoll failures: {e}")
                 except Exception:
                     pass
-            time.sleep(5)
+            time.sleep(sleep_sec)
 
 
 if __name__ == "__main__":

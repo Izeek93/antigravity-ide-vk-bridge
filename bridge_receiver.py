@@ -58,12 +58,38 @@ def check_incidents():
             pass
     return False
 
+def check_sos() -> bool:
+    """Проверка экстренного сигнала SOS (минуя обычную очередь)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        import sos_manager
+        sos_event = sos_manager.check_and_consume_sos()
+        if sos_event:
+            print("\n" + "="*60)
+            print("🚨🚨🚨 [EMERGENCY SOS SIGNAL RECEIVED] 🚨🚨🚨")
+            print(f"Источник: {sos_event.get('source')} | Время: {sos_event.get('datetime')}")
+            print(f"Детали: {sos_event.get('details')}")
+            print("ПРИЧИНА: Пользователь нажал скрытую кнопку SOS!")
+            print("Это означает, что либо сообщения пользователя не доходят, либо ответы агента не видны.")
+            print("ИНСТРУКЦИЯ ДЛЯ АГЕНТА: НЕМЕДЛЕННО проведи аудит последних логов и сетевых статусов,")
+            print("и отправь краткий фактологический отчёт о состоянии связи.")
+            print("="*60 + "\n", flush=True)
+            return True
+    except Exception:
+        pass
+    return False
+
 def main():
+    if check_sos():
+        sys.exit(0)
     if check_incidents():
         sys.exit(0)
 
     while True:
         try:
+            if check_sos():
+                sys.exit(0)
+
             messages = pop_messages()
             if messages:
                 print_messages(messages)

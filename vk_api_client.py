@@ -21,11 +21,19 @@ def call_api(method: str, params: dict = None, token: str = None) -> dict:
     
     data = urllib.parse.urlencode(params).encode("utf-8")
     req = urllib.request.Request(API_BASE + method, data=data)
-    with urllib.request.urlopen(req, timeout=15) as response:
-        res = json.loads(response.read().decode("utf-8"))
-        if "error" in res:
-            raise RuntimeError(f"VK API Error ({method}): {res['error']}")
-        return res.get("response", {})
+    last_err = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                res = json.loads(response.read().decode("utf-8"))
+                if "error" in res:
+                    raise RuntimeError(f"VK API Error ({method}): {res['error']}")
+                return res.get("response", {})
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(1.0)
+    raise last_err
 
 def send_message(user_id: int, text: str, keyboard: dict = None, attachment: str = None) -> int:
     params = {
@@ -46,14 +54,70 @@ def send_message(user_id: int, text: str, keyboard: dict = None, attachment: str
             return call_api("messages.send", params)
         raise
 
-def set_activity(user_id: int, activity_type: str = "typing"):
+_flood_cooldown_until = 0.0
+
+def edit_message(peer_id: int, message_id: int, text: str, keyboard: dict = None, attachment: str = None) -> bool:
+    global _flood_cooldown_until
+    if time.time() < _flood_cooldown_until:
+        return False
+
+    params = {
+        "peer_id": peer_id,
+        "message_id": message_id,
+        "message": text,
+        "dont_parse_links": 1
+    }
+    if keyboard:
+        params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
+    if attachment:
+        params["attachment"] = attachment
     try:
-        call_api("messages.setActivity", {
-            "user_id": user_id,
+        res = call_api("messages.edit", params)
+        return bool(res)
+    except Exception as e:
+        err_str = str(e)
+        if "Flood control" in err_str or "'error_code': 9" in err_str:
+            _flood_cooldown_until = time.time() + 30.0
+            print(f"[VK API Warning] Flood control on messages.edit! Cooldown 30s activated.", file=sys.stderr)
+        else:
+            print(f"[VK API Warning] messages.edit failed: {e}", file=sys.stderr)
+        return False
+
+def delete_message(peer_id: int, message_id: int, delete_for_all: bool = True) -> bool:
+    params = {
+        "peer_id": peer_id,
+        "message_ids": message_id,
+        "delete_for_all": 1 if delete_for_all else 0
+    }
+    try:
+        res = call_api("messages.delete", params)
+        return bool(res)
+    except Exception as e:
+        print(f"[VK API Warning] messages.delete failed: {e}", file=sys.stderr)
+        return False
+
+def send_reaction(peer_id: int, cmid: int, reaction_id: int = 1) -> bool:
+    try:
+        res = call_api("messages.sendReaction", {
+            "peer_id": peer_id,
+            "cmid": cmid,
+            "reaction_id": reaction_id
+        })
+        return bool(res)
+    except Exception as e:
+        print(f"[VK API Warning] sendReaction failed: {e}", file=sys.stderr)
+        return False
+
+def set_activity(user_id: int, activity_type: str = "typing") -> bool:
+    try:
+        res = call_api("messages.setActivity", {
+            "peer_id": user_id,
             "type": activity_type
         })
-    except Exception:
-        pass
+        return bool(res == 1 or res is True)
+    except Exception as e:
+        print(f"[VK API Warning] setActivity failed for {user_id}: {e}", file=sys.stderr)
+        return False
 
 def mark_as_read(peer_id: int, start_message_id: int = None):
     try:
