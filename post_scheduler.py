@@ -1,18 +1,17 @@
 """
 vk-bot/post_scheduler.py
 ========================
-Интеллектуальный менеджер отложенного постинга для сообщества «ЛФХ» (ID: 149687922).
+Интеллектуальный менеджер отложенного постинга для сообществ ВКонтакте.
 
-Правила расписания (согласованы пользователем):
-1. Шаг публикации: 5 часов.
-2. Плавающий люфт (джиттер): ±15 минут (чтобы убрать алгоритмическую роботизацию).
-3. Тихие часы (ночная пауза): с 23:00 до 09:00.
-   - Посты, попадающие на ночь, автоматически сдвигаются на утро (09:00 - 09:30).
-4. Согласование через закрытую беседу «Апрувы постов» (peer_id: 2000000005).
-5. Кнопки согласования:
-   - [✅ Одобрено] ➔ ставит пост в официальный таймер VK (wall.post с publish_date).
-   - [✏️ Доработка] ➔ статус 'revising', запрос правок у автора.
+Возможности расписания и модерации:
+1. Шаг публикации: настраиваемый интервал (по умолчанию 5 часов).
+2. Плавающий люфт (джиттер): ±15 минут (защита от алгоритмической роботизации платформы).
+3. Тихие часы (ночная пауза): с 23:00 до 09:00 (перенос на утренний слот).
+4. Согласование через беседу модерации (Inline-кнопки):
+   - [✅ Одобрено] ➔ официальный таймер VK (wall.post с publish_date).
+   - [✏️ Доработка] ➔ статус 'revising', редактирование на месте через messages.edit (CMID).
    - [❌ Отклонено] ➔ статус 'rejected', отмена публикации.
+   - [🚫 Отозвать] ➔ снятие с публикации и удаление из таймера стены.
 """
 
 import os
@@ -225,10 +224,20 @@ def delete_post_from_wall(post_id: int) -> Tuple[bool, str]:
 def ensure_community_link(text: str) -> str:
     """
     Гарантирует наличие кликабельной гиперссылки на сообщество для репостов.
-    Формат VK: [club<id>|тут].
+    Шаблон считывается из config.VK_POST_FOOTER_TEMPLATE.
     """
-    gid = getattr(config, "VK_GROUP_ID", 149687922)
-    link_line = f"Больше интересного — [club{gid}|ТУТ] 💡"
+    gid = getattr(config, "VK_GROUP_ID", 0)
+    if not gid:
+        return text.strip()
+
+    template = getattr(config, "VK_POST_FOOTER_TEMPLATE", "")
+    if not template:
+        return text.strip()
+
+    try:
+        link_line = template.format(group_id=gid)
+    except Exception:
+        link_line = f"Больше интересного — [club{gid}|ТУТ] 💡"
 
     # Удаляем любые старые варианты строки со ссылкой на группу
     cleaned_lines = []
@@ -253,12 +262,16 @@ def create_and_send_draft(
     text: str,
     attachments: str = "",
     wall_attachments: str = "",
-    peer_id: int = 2000000005,
+    peer_id: Optional[int] = None,
     custom_publish_date: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Создает черновик поста, рассчитывает таймер и отправляет карточку на согласование в беседу.
     """
+    target_peer = peer_id or getattr(config, "VK_APPROVALS_PEER_ID", 0)
+    if not target_peer:
+        raise ValueError("Peer ID для согласования не задан и не настроен в VK_APPROVALS_PEER_ID")
+
     drafts = load_drafts()
     draft_id = f"post_{int(time.time())}_{random.randint(100, 999)}"
 
@@ -281,7 +294,7 @@ def create_and_send_draft(
         "publish_date_str": dt_str,
         "status": "pending",
         "created_at": int(time.time()),
-        "peer_id": peer_id
+        "peer_id": target_peer
     }
     drafts[draft_id] = draft
     save_drafts(drafts)
@@ -290,7 +303,7 @@ def create_and_send_draft(
 
     kb = get_approval_keyboard(draft_id, publish_date_str=dt_str)
     send_params = {
-        "peer_ids": peer_id,
+        "peer_ids": target_peer,
         "message": card_msg,
         "keyboard": json.dumps(kb, ensure_ascii=False),
         "random_id": random.randint(1, 10000000)
@@ -300,7 +313,7 @@ def create_and_send_draft(
         send_params["attachment"] = attachments
 
     res = vk.call_api("messages.send", send_params)
-    logger.info(f"Черновик {draft_id} отправлен на согласование в peer {peer_id}: {res}")
+    logger.info(f"Черновик {draft_id} отправлен на согласование в peer {target_peer}: {res}")
 
     # Извлекаем conversation_message_id для бесед (peer_ids возвращает список объектов)
     cmid = None
@@ -435,28 +448,29 @@ def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bo
                 "random_id": random.randint(1, 10000000)
             })
 
-            # 2. Дублирование в скрытое хранилище постов (беседа «Одобренные посты»)
-            storage_peer = getattr(config, "VK_STORAGE_PEER_ID", 2000000006)
-            storage_card = (
-                f"📦 ОДОБРЕННЫЙ ПОСТ В ТАЙМЕРЕ\n"
-                f"«{draft.get('title', 'Без названия')}»\n\n"
-                f"{format_for_vk(draft['text'])}\n\n"
-                f"⏰ Запланирован на: {pub_str}\n"
-                f"🔗 Запись в таймере: wall-{config.VK_GROUP_ID}_{pid}\n"
-                f"🆔 Черновик: {draft_id}"
-            )
-            storage_params = {
-                "peer_id": storage_peer,
-                "message": storage_card,
-                "keyboard": recall_kb_json,
-                "random_id": random.randint(1, 10000000)
-            }
-            if draft.get("attachments"):
-                storage_params["attachment"] = draft["attachments"]
-            try:
-                vk.call_api("messages.send", storage_params)
-            except Exception as e:
-                logger.warning(f"Не удалось отправить пост в хранилище {storage_peer}: {e}")
+            # 2. Опциональное дублирование в резервное хранилище постов
+            storage_peer = getattr(config, "VK_STORAGE_PEER_ID", 0)
+            if storage_peer and storage_peer != peer_id:
+                storage_card = (
+                    f"📦 ОДОБРЕННЫЙ ПОСТ В ТАЙМЕРЕ\n"
+                    f"«{draft.get('title', 'Без названия')}»\n\n"
+                    f"{format_for_vk(draft['text'])}\n\n"
+                    f"⏰ Запланирован на: {pub_str}\n"
+                    f"🔗 Запись в таймере: wall-{config.VK_GROUP_ID}_{pid}\n"
+                    f"🆔 Черновик: {draft_id}"
+                )
+                storage_params = {
+                    "peer_id": storage_peer,
+                    "message": storage_card,
+                    "keyboard": recall_kb_json,
+                    "random_id": random.randint(1, 10000000)
+                }
+                if draft.get("attachments"):
+                    storage_params["attachment"] = draft["attachments"]
+                try:
+                    vk.call_api("messages.send", storage_params)
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить пост в хранилище {storage_peer}: {e}")
 
             return True, reply
 
@@ -498,9 +512,9 @@ def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bo
             "random_id": random.randint(1, 10000000)
         })
 
-        # Также уведомляем хранилище постов
-        storage_peer = getattr(config, "VK_STORAGE_PEER_ID", 2000000006)
-        if storage_peer != peer_id:
+        # Также уведомляем хранилище постов, если настроено
+        storage_peer = getattr(config, "VK_STORAGE_PEER_ID", 0)
+        if storage_peer and storage_peer != peer_id:
             try:
                 vk.call_api("messages.send", {
                     "peer_id": storage_peer,

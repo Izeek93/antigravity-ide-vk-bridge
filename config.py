@@ -14,8 +14,9 @@ _raw_gid = os.getenv("VK_GROUP_ID", "").strip()
 VK_GROUP_ID = int(_raw_gid) if _raw_gid.isdigit() else 0
 VK_API_VERSION = "5.199"
 
-VK_APPROVALS_PEER_ID = int(os.getenv("VK_APPROVALS_PEER_ID", "2000000005"))
-VK_STORAGE_PEER_ID = int(os.getenv("VK_STORAGE_PEER_ID", "2000000006"))
+VK_APPROVALS_PEER_ID = int(os.getenv("VK_APPROVALS_PEER_ID", "0"))
+VK_STORAGE_PEER_ID = int(os.getenv("VK_STORAGE_PEER_ID", "0"))
+VK_POST_FOOTER_TEMPLATE = os.getenv("VK_POST_FOOTER_TEMPLATE", "Больше интересного — [club{group_id}|ТУТ] 💡")
 
 # User whitelist
 _raw_allowed = os.getenv("VK_ALLOWED_USER_IDS", "").strip()
