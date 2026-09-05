@@ -28,6 +28,7 @@ logger = logging.getLogger("PostScheduler")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DRAFTS_FILE = os.path.join(BASE_DIR, "drafts.json")
+REVISION_STATE_FILE = os.path.join(BASE_DIR, "revision_state.json")
 
 STEP_HOURS = 5
 JITTER_MINUTES = 15
@@ -131,6 +132,41 @@ def load_drafts() -> Dict[str, Any]:
 def save_drafts(drafts: Dict[str, Any]):
     with open(DRAFTS_FILE, "w", encoding="utf-8") as f:
         json.dump(drafts, f, indent=2, ensure_ascii=False)
+
+def set_active_revision(draft_id: str, user_id: int):
+    """Сохраняет текущий черновик в состоянии активной доработки."""
+    data = {
+        "draft_id": draft_id,
+        "user_id": user_id,
+        "timestamp": int(time.time())
+    }
+    try:
+        with open(REVISION_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить revision_state: {e}")
+
+def get_active_revision(max_age_seconds: int = 3600) -> Optional[Dict[str, Any]]:
+    """Возвращает контекст активного черновика в ревизии (окно ожидания 1 час)."""
+    if not os.path.exists(REVISION_STATE_FILE):
+        return None
+    try:
+        with open(REVISION_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            ts = data.get("timestamp", 0)
+            if time.time() - ts <= max_age_seconds:
+                return data
+    except Exception:
+        pass
+    return None
+
+def clear_active_revision():
+    """Сбрасывает состояние активной доработки после получения правок."""
+    try:
+        if os.path.exists(REVISION_STATE_FILE):
+            os.remove(REVISION_STATE_FILE)
+    except Exception:
+        pass
 
 def get_approval_keyboard(draft_id: str, publish_date_str: str = "") -> dict:
     """Формирует Inline-кнопки согласования (Одобрено / Доработка / Отклонено)."""
@@ -529,12 +565,14 @@ def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bo
     elif action == "post_revise":
         draft["status"] = "revising"
         save_drafts(drafts)
+        set_active_revision(draft_id, user_id)
+
         reply = (
             f"✏️ Черновик «{draft.get('title')}» отправлен на доработку.\n\n"
-            f"Напиши прямо сюда свои замечания (стиль, факты, заголовок, картинку) — я внесу правки и пришлю обновленный черновик."
+            f"Напиши прямо сюда или наговори голосом свои замечания (текст, картинка, стиль) — я свяжу их с этим постом, агент внесёт правки и обновит карточку на месте."
         )
         vk.call_api("messages.send", {
-            "peer_id": peer_id,
+            "peer_ids": peer_id,
             "message": reply,
             "random_id": random.randint(1, 10000000)
         })
@@ -546,7 +584,7 @@ def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bo
                 "chat_id": peer_id,
                 "user_id": user_id,
                 "user": f"vk_id{user_id}",
-                "text": f"[✏️ ДОРАБОТКА ПОСТА]: Пользователь отправил на доработку черновик «{draft.get('title')}» (ID: {draft_id}).",
+                "text": f"[✏️ ДОРАБОТКА ПОСТА]: Черновик «{draft.get('title')}» (ID: {draft_id}) ожидает замечаний пользователя.",
                 "draft_id": draft_id,
                 "timestamp": time.time()
             })

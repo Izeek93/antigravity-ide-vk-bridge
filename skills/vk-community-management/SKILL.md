@@ -60,6 +60,7 @@ description: "Управление стеной и беседами сообще
 | :--- | :--- | :--- |
 | `vk_schedule_post` | Создать отложенный черновик и отправить карточку в чат согласования | `title`, `text`, `attachments`, `wall_attachments`, `custom_publish_date`, `peer_id` |
 | `vk_list_scheduled_posts` | Просмотреть очередь постов и их статусы | `filter_status` (`pending`, `approved`, `revising`, `rejected`, `recalled`) |
+| `vk_update_scheduled_post` | Редактировать черновик и карточку согласования НА МЕСТЕ (in-place) | `draft_id`, `text`, `photo_path` |
 | `vk_recall_scheduled_post` | Отозвать пост из публикации и удалить из таймера стены | `draft_id` |
 | `vk_post_to_wall` | Мгновенная публикация на стене сообщества прямо сейчас | `text`, `attachments` |
 

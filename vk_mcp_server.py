@@ -216,6 +216,54 @@ def vk_recall_scheduled_post(draft_id: str) -> str:
         return f"Ошибка отзыва публикации: {e}"
 
 @mcp.tool()
+def vk_update_scheduled_post(draft_id: str, text: str = "", photo_path: str = "") -> str:
+    """
+    Обновляет черновик отложенного поста и редактирует карточку согласования НА МЕСТЕ (in-place) через messages.edit.
+    Используется в контуре доработки (Stateful Revision Loop) по замечаниям модератора.
+    
+    :param draft_id: Идентификатор черновика (например 'post_1788572119_541')
+    :param text: Обновленный текст поста (опционально)
+    :param photo_path: Абсолютный путь к новому файлу изображения (опционально)
+    """
+    try:
+        import post_scheduler
+        drafts = post_scheduler.load_drafts()
+        draft = drafts.get(draft_id)
+        if not draft:
+            return f"Ошибка: черновик с ID '{draft_id}' не найден."
+
+        new_text = text.strip() if text else None
+        new_attachments = None
+        new_wall_attachments = None
+
+        if photo_path and os.path.exists(photo_path):
+            target_peer = draft.get("peer_id", getattr(config, "VK_APPROVALS_PEER_ID", 0))
+            chat_att = vk.upload_photo(target_peer, photo_path)
+            if chat_att:
+                new_attachments = chat_att
+            try:
+                from upload_wall_photo import upload_photo_to_wall
+                wall_att = upload_photo_to_wall(photo_path)
+                if wall_att:
+                    new_wall_attachments = wall_att
+            except Exception as we:
+                logger.warning(f"Не удалось загрузить фото на стену: {we}")
+
+        ok = post_scheduler.update_draft_card(
+            draft_id=draft_id,
+            new_text=new_text,
+            new_attachments=new_attachments,
+            new_wall_attachments=new_wall_attachments
+        )
+        if ok:
+            return f"Черновик '{draft_id}' успешно обновлен, карточка согласования отредактирована на месте!"
+        else:
+            return f"Не удалось обновить карточку черновика '{draft_id}'."
+    except Exception as e:
+        logger.error(f"Ошибка в vk_update_scheduled_post: {e}", exc_info=True)
+        return f"Ошибка обновления черновика: {e}"
+
+@mcp.tool()
 def vk_get_status() -> str:
     """
     Возвращает актуальную диагностику: статус моста, очереди inbox, голосового движка и настроек.

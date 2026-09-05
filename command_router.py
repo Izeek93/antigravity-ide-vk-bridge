@@ -15,6 +15,7 @@ import sys
 import time
 import re
 import json
+import random
 from typing import Optional, Dict, Any
 
 import config
@@ -119,6 +120,41 @@ def dispatch_command(user_id: int, raw_text: str, payload: str = "", peer_id: Op
                 return True
         except Exception as e:
             print(f"[Payload Parse Error] {e}", file=sys.stderr)
+
+    # 0.1. Проверка активного контекста доработки черновика (Stateful Revision Loop)
+    import post_scheduler
+    active_rev = post_scheduler.get_active_revision()
+    if active_rev and not cmd.startswith("/") and cmd not in ("меню", "помощь", "лимиты", "скриншот", "задачи", "голос", "статус"):
+        draft_id = active_rev.get("draft_id")
+        drafts = post_scheduler.load_drafts()
+        draft = drafts.get(draft_id)
+        if draft and draft.get("status") == "revising":
+            target_peer = peer_id if peer_id is not None else user_id
+            push_message({
+                "source": "VK_REVISION_FEEDBACK",
+                "chat_id": target_peer,
+                "peer_id": target_peer,
+                "user_id": user_id,
+                "user": f"vk_id{user_id}",
+                "draft_id": draft_id,
+                "draft_title": draft.get("title", ""),
+                "feedback": raw_text,
+                "text": f"[✏️ ПРАВКА ЧЕРНОВИКА «{draft.get('title')}» (ID: {draft_id})]: «{raw_text}»",
+                "timestamp": time.time()
+            })
+            post_scheduler.clear_active_revision()
+
+            ack_msg = (
+                f"✍️ Принято к доработке поста «{draft.get('title')}»!\n\n"
+                f"Твои замечания: «{raw_text}»\n\n"
+                f"⏳ Агент в IDE вносит правки и обновит карточку прямо в чате."
+            )
+            vk.call_api("messages.send", {
+                "peer_ids": target_peer,
+                "message": ack_msg,
+                "random_id": random.randint(1, 10000000)
+            })
+            return True
 
     # Текстовые эквиваленты кнопки отзыва публикации
     if (
