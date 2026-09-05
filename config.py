@@ -18,6 +18,12 @@ VK_APPROVALS_PEER_ID = int(os.getenv("VK_APPROVALS_PEER_ID", "0"))
 VK_STORAGE_PEER_ID = int(os.getenv("VK_STORAGE_PEER_ID", "0"))
 VK_POST_FOOTER_TEMPLATE = os.getenv("VK_POST_FOOTER_TEMPLATE", "Больше интересного — [club{group_id}|ТУТ] 💡")
 
+# Параметры расписания публикаций (по умолчанию шаг 3 часа с плавающими минутами)
+VK_STEP_HOURS = float(os.getenv("VK_STEP_HOURS", "3.0"))
+VK_JITTER_MINUTES = int(os.getenv("VK_JITTER_MINUTES", "20"))
+VK_QUIET_START_HOUR = int(os.getenv("VK_QUIET_START_HOUR", "23"))
+VK_QUIET_END_HOUR = int(os.getenv("VK_QUIET_END_HOUR", "9"))
+
 # User whitelist
 _raw_allowed = os.getenv("VK_ALLOWED_USER_IDS", "").strip()
 VK_ALLOWED_USER_IDS = set()

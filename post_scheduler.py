@@ -30,12 +30,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DRAFTS_FILE = os.path.join(BASE_DIR, "drafts.json")
 REVISION_STATE_FILE = os.path.join(BASE_DIR, "revision_state.json")
 
-STEP_HOURS = 5
-JITTER_MINUTES = 15
-QUIET_START_HOUR = 23  # 23:00
-QUIET_END_HOUR = 9     # 09:00
-
 import config
+STEP_HOURS = getattr(config, "VK_STEP_HOURS", 3.0)
+JITTER_MINUTES = getattr(config, "VK_JITTER_MINUTES", 20)
+QUIET_START_HOUR = getattr(config, "VK_QUIET_START_HOUR", 23)  # 23:00
+QUIET_END_HOUR = getattr(config, "VK_QUIET_END_HOUR", 9)     # 09:00
+
 import vk_api_client as vk
 from vk_formatter import format_for_vk
 
@@ -84,7 +84,7 @@ def get_last_postponed_time() -> Optional[int]:
 
 def calculate_next_publish_date(base_time: Optional[int] = None) -> Tuple[int, str]:
     """
-    Расчёт времени публикации с шагом 5 часов (±15 мин) и учётом тихих часов (23:00 - 09:00).
+    Расчёт времени публикации с шагом ~3 часа (±20 мин) и учётом тихих часов (23:00 - 09:00).
     Возвращает (timestamp, читаемая_строка).
     """
     now = int(time.time())
@@ -95,9 +95,9 @@ def calculate_next_publish_date(base_time: Optional[int] = None) -> Tuple[int, s
     if base_time < now:
         base_time = now
 
-    # Шаг 5 часов + джиттер ±15 мин
+    # Шаг ~3 часа + плавающие минуты (джиттер ±20 мин)
     jitter_sec = random.randint(-JITTER_MINUTES * 60, JITTER_MINUTES * 60)
-    candidate_ts = base_time + (STEP_HOURS * 3600) + jitter_sec
+    candidate_ts = int(base_time + (STEP_HOURS * 3600) + jitter_sec)
 
     # Проверка на тихие часы (23:00 - 09:00 локального времени)
     dt = datetime.datetime.fromtimestamp(candidate_ts)
@@ -369,7 +369,8 @@ def update_draft_card(
     draft_id: str,
     new_text: Optional[str] = None,
     new_attachments: Optional[str] = None,
-    new_wall_attachments: Optional[str] = None
+    new_wall_attachments: Optional[str] = None,
+    new_publish_date: Optional[int] = None
 ) -> bool:
     """
     Обновляет черновик и редактирует карточку согласования НА МЕСТЕ через messages.edit.
@@ -386,6 +387,9 @@ def update_draft_card(
         draft["attachments"] = new_attachments.strip()
     if new_wall_attachments is not None:
         draft["wall_attachments"] = new_wall_attachments.strip()
+    if new_publish_date is not None:
+        draft["publish_date"] = new_publish_date
+        draft["publish_date_str"] = datetime.datetime.fromtimestamp(new_publish_date).strftime("%d.%m.%Y в %H:%M")
 
     draft["status"] = "pending"
     drafts[draft_id] = draft
