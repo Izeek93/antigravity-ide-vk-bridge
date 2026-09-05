@@ -13,6 +13,9 @@ vk-bot/command_router.py
 import os
 import sys
 import time
+import re
+import json
+from typing import Optional, Dict, Any
 
 import config
 import vk_api_client as vk
@@ -94,12 +97,73 @@ def handle_remote_approval(user_id: int, cmd: str) -> bool:
         return False
 
 
-def dispatch_command(user_id: int, raw_text: str) -> bool:
+def dispatch_command(user_id: int, raw_text: str, payload: str = "", peer_id: Optional[int] = None) -> bool:
     """
     Маршрутизация входящего сообщения как системной команды моста.
     Возвращает True, если сообщение было служебной командой и обработано.
     """
-    cmd = (raw_text or "").strip().lower()
+    raw = (raw_text or "").strip()
+    # Срезаем префикс упоминания бота в беседах: [club149687922|@club149687922] или [club149687922|ЛФХ]
+    clean_text = re.sub(r"^\[(?:club|public)\d+\|[^\]]+\]\s*", "", raw, flags=re.IGNORECASE).strip()
+    cmd = clean_text.lower()
+
+    # 0. Интерактивные кнопки согласования отложенных постов (Одобрено / Доработка / Отклонено / Отозвать)
+    if payload:
+        try:
+            pdata = json.loads(payload) if isinstance(payload, str) else payload
+            pcmd = pdata.get("command", "")
+            if pcmd in ("post_approve", "post_revise", "post_reject", "post_recall"):
+                import post_scheduler
+                draft_id = pdata.get("draft_id", "")
+                post_scheduler.handle_approval_action(pcmd, draft_id, user_id)
+                return True
+        except Exception as e:
+            print(f"[Payload Parse Error] {e}", file=sys.stderr)
+
+    # Текстовые эквиваленты кнопки отзыва публикации
+    if (
+        cmd in ("отозвать", "🚫 отозвать", "🚫 отозвать публикацию", "отменить публикацию", "отозвать черновик")
+        or cmd.startswith("🚫 отозвать")
+        or cmd.startswith("отозвать")
+        or cmd.startswith("отменить публикацию")
+    ):
+        try:
+            import post_scheduler
+            drafts = post_scheduler.load_drafts()
+            approved = [d for d in drafts.values() if d.get("status") in ("approved", "pending")]
+            if approved:
+                approved.sort(key=lambda d: d.get("created_at", 0), reverse=True)
+                target_draft = approved[0]
+                post_scheduler.handle_approval_action("post_recall", target_draft["id"], user_id)
+                return True
+        except Exception as e:
+            print(f"[Text Recall Error] {e}", file=sys.stderr)
+
+    # Текстовые эквиваленты кнопок согласования постов (с кнопками и с упоминанием бота)
+    if (
+        cmd in ("одобрено", "✅ одобрено", "доработка", "✏️ доработка", "отклонено", "❌ отклонено")
+        or cmd.startswith("✅ одобрено")
+        or cmd.startswith("одобрено")
+        or cmd.startswith("✏️ доработка")
+        or cmd.startswith("доработка")
+        or cmd.startswith("❌ отклонено")
+        or cmd.startswith("отклонено")
+    ):
+        try:
+            import post_scheduler
+            drafts = post_scheduler.load_drafts()
+            pending = [d for d in drafts.values() if d.get("status") in ("pending", "revising")]
+            if pending:
+                pending.sort(key=lambda d: d.get("created_at", 0), reverse=True)
+                target_draft = pending[0]
+                action = "post_approve" if "одобр" in cmd else ("post_revise" if "доработ" in cmd else "post_reject")
+                post_scheduler.handle_approval_action(action, target_draft["id"], user_id)
+                return True
+        except Exception as e:
+            print(f"[Text Post Action Error] {e}", file=sys.stderr)
+
+
+
     if not cmd:
         return False
 

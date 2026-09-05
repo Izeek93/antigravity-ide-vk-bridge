@@ -35,12 +35,17 @@ def call_api(method: str, params: dict = None, token: str = None) -> dict:
                 time.sleep(1.0)
     raise last_err
 
-def send_message(user_id: int, text: str, keyboard: dict = None, attachment: str = None) -> int:
+def send_message(user_id: int, text: str, keyboard: dict = None, attachment: str = None, peer_id: int = None) -> int:
+    target = peer_id if peer_id is not None else user_id
     params = {
-        "user_id": user_id,
         "random_id": random.randint(1, 2147483647),
         "message": text,
     }
+    if target >= 2000000000:
+        params["peer_id"] = target
+    else:
+        params["user_id"] = target
+
     if keyboard:
         params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
     if attachment:
@@ -53,6 +58,7 @@ def send_message(user_id: int, text: str, keyboard: dict = None, attachment: str
             params.pop("keyboard", None)
             return call_api("messages.send", params)
         raise
+
 
 _flood_cooldown_until = 0.0
 
@@ -147,41 +153,52 @@ def verify_message_delivered(msg_id: int, expect_attachment: str = None) -> bool
 
 def upload_photo(user_id: int, photo_path: str) -> str:
     """Uploads a photo to VK messages server and returns attachment string 'photo{owner_id}_{id}'"""
-    upload_server = call_api("photos.getMessagesUploadServer", {"peer_id": user_id})
-    upload_url = upload_server.get("upload_url")
-    if not upload_url:
-        raise RuntimeError("Failed to get photos upload server URL")
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            upload_server = call_api("photos.getMessagesUploadServer", {"peer_id": user_id})
+            upload_url = upload_server.get("upload_url")
+            if not upload_url:
+                raise RuntimeError("Failed to get photos upload server URL")
 
-    # Multipart upload
-    boundary = "----WebKitFormBoundary" + "".join([str(random.randint(0, 9)) for _ in range(16)])
-    with open(photo_path, "rb") as f:
-        file_bytes = f.read()
+            boundary = "----WebKitFormBoundary" + "".join([str(random.randint(0, 9)) for _ in range(16)])
+            ext = os.path.splitext(photo_path)[1].lower()
+            mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+            fname = "photo.jpg" if ext in (".jpg", ".jpeg") else "photo.png"
 
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="photo"; filename="{os.path.basename(photo_path)}"\r\n'
-        f"Content-Type: image/png\r\n\r\n"
-    ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+            with open(photo_path, "rb") as f:
+                file_bytes = f.read()
 
-    req = urllib.request.Request(upload_url, data=body)
-    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        upload_resp = json.loads(r.read().decode("utf-8"))
+            body = bytearray()
+            body.extend(f"--{boundary}\r\n".encode("utf-8"))
+            body.extend(f'Content-Disposition: form-data; name="photo"; filename="{fname}"\r\n'.encode("utf-8"))
+            body.extend(f"Content-Type: {mime}\r\n\r\n".encode("utf-8"))
+            body.extend(file_bytes)
+            body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
 
-    photo_val = upload_resp.get("photo")
-    if not photo_val or photo_val == "[]":
-        raise RuntimeError(f"VK photos upload server returned invalid photo data: {upload_resp}")
+            req = urllib.request.Request(upload_url, data=bytes(body))
+            req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+            with urllib.request.urlopen(req, timeout=30) as r:
+                upload_resp = json.loads(r.read().decode("utf-8"))
 
-    # Save messages photo
-    save_resp = call_api("photos.saveMessagesPhoto", {
-        "photo": photo_val,
-        "server": upload_resp["server"],
-        "hash": upload_resp["hash"],
-    })
-    if not save_resp:
-        raise RuntimeError("Failed to save uploaded photo in VK")
-    saved = save_resp[0]
-    return f"photo{saved['owner_id']}_{saved['id']}"
+            photo_val = upload_resp.get("photo")
+            if not photo_val or photo_val == "[]":
+                raise RuntimeError(f"VK photos upload server returned invalid photo data: {upload_resp}")
+
+            save_resp = call_api("photos.saveMessagesPhoto", {
+                "photo": photo_val,
+                "server": upload_resp["server"],
+                "hash": upload_resp["hash"],
+            })
+            if not save_resp:
+                raise RuntimeError("Failed to save uploaded photo in VK")
+            saved = save_resp[0]
+            return f"photo{saved['owner_id']}_{saved['id']}"
+        except Exception as e:
+            last_err = e
+            print(f"[Upload Warning] Attempt {attempt} failed: {e}", file=sys.stderr)
+            time.sleep(2 * attempt)
+    raise RuntimeError(f"Failed to upload photo after 3 attempts: {last_err}")
 
 def upload_audiomessage(user_id: int, audio_path: str) -> str:
     """Uploads voice note (audiomessage / doc) to VK messages server and returns 'doc{owner_id}_{id}'"""
