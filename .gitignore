@@ -43,6 +43,12 @@ inspect_*.py
 voice_reply.ogg
 reply_*.py
 run_reply.py
+test_*.py
+update_*.py
+upload_msg_photo.py
+batch_*.py
+publish_*.py
+drafts.json
 
 # Large AI model weights and binaries (>100 MB, GitHub limit)
 omnivoice-gguf/

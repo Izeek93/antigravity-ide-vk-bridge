@@ -231,16 +231,18 @@ def process_message(msg: dict):
                 except Exception as e:
                     print(f"[Doc Download Error] {e}", file=sys.stderr)
 
-    if not text:
+    if not text and not payload_raw:
         return
 
+    peer_id = msg.get("peer_id", user_id)
+
     # Проверка служебных команд моста через command_router
-    if dispatch_command(user_id, text):
+    if dispatch_command(user_id, text, payload=payload_raw, peer_id=peer_id):
         return
 
     # Перекладывание в изолированную FIFO-очередь inbox.json для IDE
-    print(f"\n📥 [VK INCOMING] User {user_id}: {text}\n", flush=True)
-    start_typing_heartbeat(user_id)
+    print(f"\n📥 [VK INCOMING] Peer {peer_id} (User {user_id}): {text}\n", flush=True)
+    start_typing_heartbeat(peer_id)
 
     # Инициализация терминального статус-трекера и реакция на входящее сообщение
     try:
@@ -250,13 +252,14 @@ def process_message(msg: dict):
         if "]:" in clean_title:
             clean_title = clean_title.split("]:", 1)[-1].strip()
         clean_title = clean_title[:45] if clean_title else "Запрос"
-        status_tracker.start_tracking(user_id, task_name=clean_title, cmid=cmid, is_voice=is_voice, stt_duration=stt_dur)
+        status_tracker.start_tracking(peer_id, task_name=clean_title, cmid=cmid, is_voice=is_voice, stt_duration=stt_dur)
     except Exception as e:
         print(f"[StatusTracker Init Error] {e}", file=sys.stderr)
 
     payload = {
         "source": "VK",
-        "chat_id": user_id,
+        "chat_id": peer_id,
+        "peer_id": peer_id,
         "user_id": user_id,
         "user": f"vk_id{user_id}",
         "text": text,
