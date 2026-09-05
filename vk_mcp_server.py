@@ -6,7 +6,10 @@ vk-bot/vk_mcp_server.py
 - vk_send_message: отправка текстовых ответов пользователю
 - vk_send_voice: нейросинтез речи (OmniVoice) и отправка голосовой заметки
 - vk_send_photo: загрузка и доставка изображений
-- vk_post_to_wall: публикация записей от имени группы на стену сообщества
+- vk_post_to_wall: мгновенная публикация записей от имени группы на стену
+- vk_schedule_post: создание отложенных записей с расчётом таймера и карточкой согласования
+- vk_list_scheduled_posts: просмотр очереди отложенных записей сообщества и их статусов
+- vk_recall_scheduled_post: отзыв поста из публикации и удаление из таймера стены
 - vk_get_status: получение состояния моста, очереди и настроек
 
 Архитектурный стандарт:
@@ -130,6 +133,87 @@ def vk_post_to_wall(text: str, attachments: str = "") -> str:
     except Exception as e:
         logger.error(f"Ошибка публикации на стену: {e}", exc_info=True)
         return f"Ошибка публикации поста на стену: {e}"
+
+@mcp.tool()
+def vk_schedule_post(title: str, text: str, attachments: str = "", wall_attachments: str = "", custom_publish_date: int = None, peer_id: int = None) -> str:
+    """
+    Создаёт отложенный черновик записи, рассчитывает оптимальный таймер (шаг 5ч, джиттер ±15м, тихие часы)
+    и отправляет интерактивную карточку согласования в беседу модерации.
+    
+    :param title: Краткий заголовок темы поста для карточки
+    :param text: Текст публикации (поддерживает разметку и ссылки)
+    :param attachments: Вложения для сообщения в беседе (например 'photo123_456')
+    :param wall_attachments: Вложения для стены сообщества (например 'photo-123_456')
+    :param custom_publish_date: Опциональный unix timestamp времени публикации (если нужно переопределить авто-расчёт)
+    :param peer_id: Опциональный ID беседы согласования (по умолчанию из VK_APPROVALS_PEER_ID)
+    """
+    try:
+        import post_scheduler
+        draft = post_scheduler.create_and_send_draft(
+            title=title,
+            text=text,
+            attachments=attachments,
+            wall_attachments=wall_attachments,
+            peer_id=peer_id,
+            custom_publish_date=custom_publish_date
+        )
+        return (
+            f"Черновик «{draft['title']}» успешно создан и отправлен на согласование!\n"
+            f"• ID черновика: {draft['id']}\n"
+            f"• Запланированное время выхода: {draft.get('publish_date_str')}\n"
+            f"• Статус: {draft['status']}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в vk_schedule_post: {e}", exc_info=True)
+        return f"Ошибка создания отложенного поста: {e}"
+
+@mcp.tool()
+def vk_list_scheduled_posts(filter_status: str = "") -> str:
+    """
+    Возвращает список запланированных постов из локальной базы очередей со статусами и временем публикации.
+    
+    :param filter_status: Опциональный фильтр статуса: 'pending', 'approved', 'revising', 'rejected', 'recalled'
+    """
+    try:
+        import post_scheduler
+        drafts = post_scheduler.load_drafts()
+        if not drafts:
+            return "Очередь отложенных публикаций пуста."
+
+        lines = ["📋 **Очередь отложенных публикаций сообщества:**"]
+        filtered = [
+            d for d in drafts.values()
+            if not filter_status or d.get("status") == filter_status.strip().lower()
+        ]
+        if not filtered:
+            return f"Публикаций со статусом '{filter_status}' не найдено."
+
+        filtered.sort(key=lambda d: d.get("publish_date", 0))
+        for idx, d in enumerate(filtered, 1):
+            st = d.get("status", "unknown")
+            st_icon = {"pending": "⏳", "approved": "✅", "revising": "✏️", "rejected": "❌", "recalled": "🚫"}.get(st, "ℹ️")
+            pid_info = f" (wall post: {d.get('vk_post_id')})" if d.get("vk_post_id") else ""
+            lines.append(f"{idx}. {st_icon} [{st.upper()}] «{d.get('title', 'Без названия')}» — {d.get('publish_date_str')}{pid_info} (ID: {d.get('id')})")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Ошибка в vk_list_scheduled_posts: {e}", exc_info=True)
+        return f"Ошибка получения списка постов: {e}"
+
+@mcp.tool()
+def vk_recall_scheduled_post(draft_id: str) -> str:
+    """
+    Отзывает черновик из публикации и удаляет запись из официального таймера стены VK (если была одобрена).
+    
+    :param draft_id: Идентификатор черновика (например 'post_1788572119_541')
+    """
+    try:
+        import post_scheduler
+        ok, msg = post_scheduler.handle_approval_action("post_recall", draft_id, user_id=0)
+        return msg
+    except Exception as e:
+        logger.error(f"Ошибка в vk_recall_scheduled_post: {e}", exc_info=True)
+        return f"Ошибка отзыва публикации: {e}"
 
 @mcp.tool()
 def vk_get_status() -> str:
