@@ -103,10 +103,12 @@ class TestVKBridgeSuite(unittest.TestCase):
         ]
         test_user = next(iter(config.VK_ALLOWED_USER_IDS)) if config.VK_ALLOWED_USER_IDS else 123456789
 
-        # Mock send_message to avoid actual VK API calls during command simulation
+        # Mock send_message and send_chat_action to avoid actual VK API calls during command simulation
         orig_send = vk.send_message
+        orig_action = vk.send_chat_action
         try:
             vk.send_message = lambda *args, **kwargs: 123456
+            vk.send_chat_action = lambda *args, **kwargs: True
             for cmd in test_commands:
                 res = command_router.dispatch_command(test_user, cmd)
                 self.assertTrue(res, f"Command '{cmd}' should be handled by command_router")
@@ -115,6 +117,7 @@ class TestVKBridgeSuite(unittest.TestCase):
             self.assertFalse(command_router.dispatch_command(test_user, "Обычный текст для агента"))
         finally:
             vk.send_message = orig_send
+            vk.send_chat_action = orig_action
 
     def test_09_desktop_screenshot_capture(self):
         """Test desktop screenshot capture function."""

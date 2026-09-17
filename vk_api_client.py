@@ -102,6 +102,27 @@ def delete_message(peer_id: int, message_id: int, delete_for_all: bool = True) -
         print(f"[VK API Warning] messages.delete failed: {e}", file=sys.stderr)
         return False
 
+def delete_conversation_message(peer_id: int, cmid: int) -> bool:
+    """Удаляет сообщение в беседе по его conversation_message_id для всех участников."""
+    params = {
+        "peer_id": peer_id,
+        "cmids": cmid,
+        "delete_for_all": 1
+    }
+    try:
+        res = call_api("messages.delete", params)
+        if isinstance(res, list) and res:
+            item = res[0]
+            if "error" in item:
+                print(f"[VK API Warning] delete_conversation_message cmid {cmid} error: {item['error']}", file=sys.stderr)
+                return False
+            return item.get("response") == 1 or item.get("conversation_message_id") == cmid
+        return bool(res)
+    except Exception as e:
+        print(f"[VK API Warning] delete_conversation_message failed for cmid {cmid}: {e}", file=sys.stderr)
+        return False
+
+
 def send_reaction(peer_id: int, cmid: int, reaction_id: int = 1) -> bool:
     try:
         res = call_api("messages.sendReaction", {

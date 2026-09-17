@@ -21,6 +21,7 @@ import time
 import random
 import logging
 import datetime
+import threading
 from typing import Optional, Dict, Any, Tuple, List
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -29,6 +30,9 @@ logger = logging.getLogger("PostScheduler")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DRAFTS_FILE = os.path.join(BASE_DIR, "drafts.json")
 REVISION_STATE_FILE = os.path.join(BASE_DIR, "revision_state.json")
+
+# Глобальный реестр таймеров удаления для отклоненных карточек (Rule 3)
+_REJECT_TIMERS: Dict[str, threading.Timer] = {}
 
 import config
 STEP_HOURS = getattr(config, "VK_STEP_HOURS", 3.0)
@@ -39,10 +43,70 @@ QUIET_END_HOUR = getattr(config, "VK_QUIET_END_HOUR", 9)     # 09:00
 import vk_api_client as vk
 from vk_formatter import format_for_vk
 
+def purge_approvals_chat(peer_id: Optional[int] = None, max_scan_cmids: int = 200) -> int:
+    """Удаляет все сообщения бота в беседе согласования (принудительная чистка)."""
+    target_peer = peer_id or getattr(config, "VK_APPROVALS_PEER_ID", 2000000001)
+    total_deleted = 0
+    for start in range(1, max_scan_cmids, 50):
+        cmid_list = list(range(start, start + 50))
+        cmid_str = ",".join(map(str, cmid_list))
+        try:
+            res = vk.call_api("messages.delete", {
+                "peer_id": target_peer,
+                "cmids": cmid_str,
+                "delete_for_all": 1
+            })
+            if isinstance(res, list):
+                successes = [r for r in res if r.get("response") == 1]
+                total_deleted += len(successes)
+        except Exception as e:
+            logger.debug(f"Ошибка пачки удаления {start}..{start+49}: {e}")
+    logger.info(f"Очистка беседы {target_peer}: удалено {total_deleted} сообщений.")
+    return total_deleted
+
+
+def schedule_ephemeral_delete(peer_id: int, cmid: int, delay_seconds: int = 35) -> threading.Timer:
+    """Планирует автоудаление служебного сообщения по истечении TTL (Rule 2)."""
+    def _deleter():
+        try:
+            vk.delete_conversation_message(peer_id, cmid)
+            logger.info(f"Эфемерное сообщение {cmid} в peer {peer_id} удалено по TTL ({delay_seconds}с)")
+        except Exception as e:
+            logger.debug(f"Не удалось удалить эфемерное сообщение {cmid}: {e}")
+
+    t = threading.Timer(delay_seconds, _deleter)
+    t.daemon = True
+    t.start()
+    return t
+
+def send_ephemeral_message(peer_id: int, text: str, ttl_seconds: int = 35) -> Optional[int]:
+    """Отправляет служебное сообщение в беседу и ставит его на автоудаление (Rule 2)."""
+    try:
+        res = vk.call_api("messages.send", {
+            "peer_ids": peer_id,
+            "message": text,
+            "random_id": random.randint(1, 10000000)
+        })
+        cmid = None
+        if isinstance(res, list) and res:
+            cmid = res[0].get("conversation_message_id")
+        elif isinstance(res, dict):
+            cmid = res.get("conversation_message_id")
+        if cmid:
+            schedule_ephemeral_delete(peer_id, cmid, delay_seconds=ttl_seconds)
+            return cmid
+    except Exception as e:
+        logger.warning(f"Ошибка отправки эфемерного сообщения: {e}")
+    return None
+
+
 def _load_user_token() -> Optional[str]:
+    tok = os.getenv("VK_USER_TOKEN", "").strip()
+    if tok:
+        return tok
     for env_path in [
+        os.path.join(BASE_DIR, ".env"),
         os.path.join(BASE_DIR, "..", "ideas", ".env.secrets"),
-        os.path.join(BASE_DIR, ".env")
     ]:
         if os.path.exists(env_path):
             try:
@@ -130,8 +194,18 @@ def load_drafts() -> Dict[str, Any]:
     return {}
 
 def save_drafts(drafts: Dict[str, Any]):
-    with open(DRAFTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(drafts, f, indent=2, ensure_ascii=False)
+    tmp_file = f"{DRAFTS_FILE}.tmp_{os.getpid()}_{random.randint(1000, 9999)}"
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(drafts, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, DRAFTS_FILE)
+    except Exception as e:
+        logger.warning(f"Ошибка атомарного сохранения drafts.json: {e}")
+        if os.path.exists(tmp_file):
+            try:
+                os.remove(tmp_file)
+            except Exception:
+                pass
 
 def set_active_revision(draft_id: str, user_id: int):
     """Сохраняет текущий черновик в состоянии активной доработки."""
@@ -230,6 +304,64 @@ def get_recall_keyboard(draft_id: str) -> dict:
             ]
         ]
     }
+
+
+def get_revising_keyboard(draft_id: str) -> dict:
+    """Формирует кнопку отмены режима доработки (возврат в согласование)."""
+    return {
+        "inline": True,
+        "buttons": [
+            [
+                {
+                    "action": {
+                        "type": "text",
+                        "label": "↩️ Отменить доработку",
+                        "payload": json.dumps({"command": "post_cancel_revise", "draft_id": draft_id})
+                    },
+                    "color": "secondary"
+                }
+            ]
+        ]
+    }
+
+
+def get_recalled_keyboard(draft_id: str) -> dict:
+    """Формирует кнопку возврата отозванной публикации обратно на согласование."""
+    return {
+        "inline": True,
+        "buttons": [
+            [
+                {
+                    "action": {
+                        "type": "text",
+                        "label": "♻️ Вернуть на согласование",
+                        "payload": json.dumps({"command": "post_restore", "draft_id": draft_id})
+                    },
+                    "color": "positive"
+                }
+            ]
+        ]
+    }
+
+
+def get_rejected_keyboard(draft_id: str) -> dict:
+    """Формирует кнопку отмены удаления отклоненного черновика (Rule 3)."""
+    return {
+        "inline": True,
+        "buttons": [
+            [
+                {
+                    "action": {
+                        "type": "text",
+                        "label": "↩️ Отменить удаление",
+                        "payload": json.dumps({"command": "post_restore", "draft_id": draft_id})
+                    },
+                    "color": "positive"
+                }
+            ]
+        ]
+    }
+
 
 def delete_post_from_wall(post_id: int) -> Tuple[bool, str]:
     """Пытается удалить пост из таймера стены сообщества через API."""
@@ -365,6 +497,89 @@ def create_and_send_draft(
 
     return draft
 
+def render_card_content(draft: Dict[str, Any]) -> Tuple[str, dict]:
+    """Генерирует актуальный текст и Inline-клавиатуру карточки в зависимости от её статуса."""
+    draft_id = draft["id"]
+    status = draft.get("status", "pending")
+    pub_str = draft.get("publish_date_str", "")
+    base_text = format_for_vk(draft.get("text", ""))
+
+    if status == "approved":
+        pid = draft.get("vk_post_id", "")
+        header = (
+            f"✅ [В ТАЙМЕРЕ СТЕНЫ — {pub_str}]\n"
+            f"🔗 wall-{config.VK_GROUP_ID}_{pid}\n"
+            f"────────────────────\n"
+        )
+        return header + base_text, get_recall_keyboard(draft_id)
+
+    elif status == "revising":
+        header = (
+            f"✏️ [НА ДОРАБОТКЕ]\n"
+            f"Ожидаются замечания или голосовой комментарий в чат...\n"
+            f"────────────────────\n"
+        )
+        return header + base_text, get_revising_keyboard(draft_id)
+
+    elif status == "recalled":
+        header = (
+            f"🚫 [ПУБЛИКАЦИЯ ОТОЗВАНА]\n"
+            f"────────────────────\n"
+        )
+        return header + base_text, get_recalled_keyboard(draft_id)
+
+    elif status == "rejected":
+        header = (
+            f"❌ [ОТКЛОНЕНО]\n"
+            f"Карточка будет автоматически удалена через 10 секунд...\n"
+            f"────────────────────\n"
+        )
+        return header + base_text, get_rejected_keyboard(draft_id)
+
+    else:
+        # Default 'pending'
+        return base_text, get_approval_keyboard(draft_id, publish_date_str=pub_str)
+
+
+def mutate_draft_card_in_place(draft_id: str, new_status: Optional[str] = None) -> bool:
+    """
+    Редактирует сообщение карточки прямо в чате через messages.edit (Rule 1).
+    Полностью устраняет дублирующие сообщения в ленте беседы.
+    """
+    drafts = load_drafts()
+    draft = drafts.get(draft_id)
+    if not draft:
+        return False
+
+    if new_status is not None:
+        draft["status"] = new_status
+        drafts[draft_id] = draft
+        save_drafts(drafts)
+
+    peer_id = draft.get("peer_id", 2000000001)
+    cmid = draft.get("conversation_message_id")
+    if not cmid:
+        return False
+
+    card_text, card_kb = render_card_content(draft)
+
+    try:
+        edit_params = {
+            "peer_id": peer_id,
+            "conversation_message_id": cmid,
+            "message": card_text,
+            "keyboard": json.dumps(card_kb, ensure_ascii=False)
+        }
+        if draft.get("attachments"):
+            edit_params["attachment"] = draft["attachments"]
+        res = vk.call_api("messages.edit", edit_params)
+        logger.info(f"Карточка {draft_id} обновлена на месте (status={draft.get('status')}, cmid={cmid}): {res}")
+        return bool(res == 1 or res is True)
+    except Exception as e:
+        logger.warning(f"Ошибка in-place мутации карточки {cmid}: {e}")
+        return False
+
+
 def update_draft_card(
     draft_id: str,
     new_text: Optional[str] = None,
@@ -373,8 +588,7 @@ def update_draft_card(
     new_publish_date: Optional[int] = None
 ) -> bool:
     """
-    Обновляет черновик и редактирует карточку согласования НА МЕСТЕ через messages.edit.
-    Использует conversation_message_id, исключая дублирование сообщений в ленте беседы.
+    Обновляет контент черновика и редактирует карточку НА МЕСТЕ через messages.edit.
     """
     drafts = load_drafts()
     draft = drafts.get(draft_id)
@@ -395,34 +609,15 @@ def update_draft_card(
     drafts[draft_id] = draft
     save_drafts(drafts)
 
-    peer_id = draft.get("peer_id", 2000000001)
-    pub_str = draft.get("publish_date_str", "")
-    kb = get_approval_keyboard(draft_id, publish_date_str=pub_str)
-
-    cmid = draft.get("conversation_message_id")
-    edited = False
-    if cmid:
-        try:
-            edit_params = {
-                "peer_id": peer_id,
-                "conversation_message_id": cmid,
-                "message": format_for_vk(draft["text"]),
-                "keyboard": json.dumps(kb, ensure_ascii=False)
-            }
-            if draft.get("attachments"):
-                edit_params["attachment"] = draft["attachments"]
-            res = vk.call_api("messages.edit", edit_params)
-            edited = bool(res == 1 or res is True)
-            logger.info(f"Карточка {draft_id} отредактирована на месте (cmid={cmid}): {res}")
-        except Exception as e:
-            logger.warning(f"Не удалось отредактировать сообщение {cmid}: {e}")
-
+    edited = mutate_draft_card_in_place(draft_id, new_status="pending")
     if not edited:
-        # Фолбэк на отправку сообщения с фиксацией нового cmid, если редактирование недоступно
+        # Фолбэк на отправку новой карточки, если редактирование невозможно
+        peer_id = draft.get("peer_id", 2000000001)
+        card_text, card_kb = render_card_content(draft)
         send_params = {
             "peer_ids": peer_id,
-            "message": format_for_vk(draft["text"]),
-            "keyboard": json.dumps(kb, ensure_ascii=False),
+            "message": card_text,
+            "keyboard": json.dumps(card_kb, ensure_ascii=False),
             "random_id": random.randint(1, 10000000)
         }
         if draft.get("attachments"):
@@ -436,16 +631,24 @@ def update_draft_card(
 
     return True
 
-def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bool, str]:
+
+def handle_approval_action(action: str, draft_id: str, user_id: int, peer_id: Optional[int] = None) -> Tuple[bool, str]:
     """
-    Обработка нажатия кнопок согласования (approve, revise, reject, recall).
+    Конечный автомат жизненного цикла кнопок согласования:
+    - post_approve: публикация в таймер стены + in-place плашка [В ТАЙМЕРЕ] + кнопка [🚫 Отозвать].
+    - post_revise: in-place плашка [НА ДОРАБОТКЕ] + кнопка [↩️ Отменить] + эфемерная подсказка (TTL 45с).
+    - post_cancel_revise: сброс режима доработки + возврат карточки в pending на месте.
+    - post_reject: in-place плашка [ОТКЛОНЕНО] + кнопка [↩️ Отменить] + автоудаление через 10с (Rule 3).
+    - post_recall: снятие из таймера стены + in-place [ОТОЗВАНО] + кнопка [♻️ Вернуть] + эфемерка (TTL 35с).
+    - post_restore: отмена таймера удаления / возврат черновика в pending на месте.
     """
     drafts = load_drafts()
     draft = drafts.get(draft_id)
     if not draft:
         return False, f"⚠️ Черновик с ID '{draft_id}' не найден."
 
-    peer_id = draft.get("peer_id", 2000000001)
+    if peer_id is None:
+        peer_id = draft.get("peer_id", 2000000001)
     pub_str = draft.get("publish_date_str", "")
 
     if action == "post_approve":
@@ -470,49 +673,27 @@ def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bo
             draft["vk_post_id"] = pid
             save_drafts(drafts)
 
-            recall_kb = get_recall_keyboard(draft_id)
-            recall_kb_json = json.dumps(recall_kb, ensure_ascii=False)
+            # Правило 1: In-Place мутация исходной карточки без спама отдельными сообщениями
+            mutate_draft_card_in_place(draft_id, "approved")
 
-            # 1. Подтверждение в беседу согласования («Апрувы постов»)
-            reply = (
-                f"✅ Черновик одобрен!\n\n"
-                f"Запись поставлена в официальный таймер сообщества.\n"
-                f"📅 Выход: {pub_str}\n"
-                f"🔗 В таймере: wall-{config.VK_GROUP_ID}_{pid}\n\n"
-                f"Если одобрение произошло случайно, нажмите кнопку отзыва ниже."
-            )
-            vk.call_api("messages.send", {
-                "peer_id": peer_id,
-                "message": reply,
-                "keyboard": recall_kb_json,
-                "random_id": random.randint(1, 10000000)
-            })
-
-            # 2. Опциональное дублирование в резервное хранилище постов
+            # Перемещение в "Одобренные посты" (VK_STORAGE_PEER_ID) "как есть", без изменения содержимого
             storage_peer = getattr(config, "VK_STORAGE_PEER_ID", 0)
             if storage_peer and storage_peer != peer_id:
-                storage_card = (
-                    f"📦 ОДОБРЕННЫЙ ПОСТ В ТАЙМЕРЕ\n"
-                    f"«{draft.get('title', 'Без названия')}»\n\n"
-                    f"{format_for_vk(draft['text'])}\n\n"
-                    f"⏰ Запланирован на: {pub_str}\n"
-                    f"🔗 Запись в таймере: wall-{config.VK_GROUP_ID}_{pid}\n"
-                    f"🆔 Черновик: {draft_id}"
-                )
                 storage_params = {
                     "peer_id": storage_peer,
-                    "message": storage_card,
-                    "keyboard": recall_kb_json,
+                    "message": format_for_vk(draft["text"]),
                     "random_id": random.randint(1, 10000000)
                 }
-                if draft.get("attachments"):
-                    storage_params["attachment"] = draft["attachments"]
+                storage_att = draft.get("attachments") or draft.get("wall_attachments")
+                if storage_att:
+                    storage_params["attachment"] = storage_att
                 try:
                     vk.call_api("messages.send", storage_params)
+                    logger.info(f"Пост {draft_id} отправлен в «Одобренные посты» ({storage_peer}) «как есть».")
                 except Exception as e:
                     logger.warning(f"Не удалось отправить пост в хранилище {storage_peer}: {e}")
 
-            return True, reply
+            return True, f"✅ Черновик «{draft.get('title')}» одобрен и помещён в таймер стены."
 
         else:
             err = res.get("error", {}).get("error_msg", "Неизвестная ошибка")
@@ -531,55 +712,34 @@ def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bo
 
         draft["status"] = "recalled"
         save_drafts(drafts)
+        mutate_draft_card_in_place(draft_id, "recalled")
 
         api_info = (
             "✅ Запись удалена из таймера стены VK через API."
             if deleted_api else
-            f"ℹ️ Ссылка на таймер группы (отложенные записи):\n"
+            f"ℹ️ Для удаления из отложки стены перейдите по ссылке:\n"
             f"https://vk.com/wall-{config.VK_GROUP_ID}?filter=postponed"
         )
-
-        reply = (
-            f"🚫 Публикация «{draft.get('title')}» отозвана!\n\n"
-            f"Пост снят с активной очереди публикации и помечен как отозванный.\n\n"
-            f"{api_info}"
+        recall_note = (
+            f"🚫 Публикация «{draft.get('title')}» отозвана.\n\n"
+            f"{api_info}\n\n"
+            f"Чтобы вернуть пост в согласование, нажмите «♻️ Вернуть на согласование» на карточке."
         )
-
-        # Отправляем в беседу согласования
-        vk.call_api("messages.send", {
-            "peer_id": peer_id,
-            "message": reply,
-            "random_id": random.randint(1, 10000000)
-        })
-
-        # Также уведомляем хранилище постов, если настроено
-        storage_peer = getattr(config, "VK_STORAGE_PEER_ID", 0)
-        if storage_peer and storage_peer != peer_id:
-            try:
-                vk.call_api("messages.send", {
-                    "peer_id": storage_peer,
-                    "message": f"🚫 Черновик «{draft.get('title')}» (ID: {draft_id}) отозван из публикации.",
-                    "random_id": random.randint(1, 10000000)
-                })
-            except Exception:
-                pass
-
-        return True, reply
+        send_ephemeral_message(peer_id, recall_note, ttl_seconds=35)
+        return True, recall_note
 
     elif action == "post_revise":
         draft["status"] = "revising"
         save_drafts(drafts)
         set_active_revision(draft_id, user_id)
+        mutate_draft_card_in_place(draft_id, "revising")
 
-        reply = (
-            f"✏️ Черновик «{draft.get('title')}» отправлен на доработку.\n\n"
-            f"Напиши прямо сюда или наговори голосом свои замечания (текст, картинка, стиль) — я свяжу их с этим постом, агент внесёт правки и обновит карточку на месте."
+        hint = (
+            f"✏️ Черновик «{draft.get('title')}» переведён в режим доработки.\n\n"
+            f"Напишите в чат или отправьте голосовое с правками — агент внесёт исправления.\n"
+            f"Для отмены нажмите кнопку «↩️ Отменить доработку» на карточке."
         )
-        vk.call_api("messages.send", {
-            "peer_ids": peer_id,
-            "message": reply,
-            "random_id": random.randint(1, 10000000)
-        })
+        send_ephemeral_message(peer_id, hint, ttl_seconds=45)
 
         try:
             from queue_manager import push_message
@@ -595,20 +755,59 @@ def handle_approval_action(action: str, draft_id: str, user_id: int) -> Tuple[bo
         except Exception:
             pass
 
-        return True, reply
+        return True, hint
+
+    elif action == "post_cancel_revise":
+        clear_active_revision()
+        draft["status"] = "pending"
+        save_drafts(drafts)
+        mutate_draft_card_in_place(draft_id, "pending")
+        send_ephemeral_message(peer_id, f"ℹ️ Режим доработки отменён. Черновик «{draft.get('title')}» возвращён на согласование.", ttl_seconds=20)
+        return True, "Доработка отменена."
 
     elif action == "post_reject":
         draft["status"] = "rejected"
         save_drafts(drafts)
-        reply = f"❌ Черновик «{draft.get('title')}» отклонен и снят с публикации."
-        vk.call_api("messages.send", {
-            "peer_id": peer_id,
-            "message": reply,
-            "random_id": random.randint(1, 10000000)
-        })
-        return True, reply
+        mutate_draft_card_in_place(draft_id, "rejected")
 
+        # Отменяем предыдущий таймер, если уже был запущен
+        old_timer = _REJECT_TIMERS.pop(draft_id, None)
+        if old_timer:
+            old_timer.cancel()
+
+        cmid = draft.get("conversation_message_id")
+        if cmid:
+            def _delete_card_task():
+                try:
+                    vk.delete_conversation_message(peer_id, cmid)
+                    logger.info(f"Карточка {draft_id} (cmid {cmid}) удалена из беседы (Rule 3 Clean-on-Reject)")
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить отклоненную карточку {cmid}: {e}")
+                finally:
+                    _REJECT_TIMERS.pop(draft_id, None)
+
+            reject_timer = threading.Timer(10.0, _delete_card_task)
+            reject_timer.daemon = True
+            reject_timer.start()
+            _REJECT_TIMERS[draft_id] = reject_timer
+
+        return True, "Карточка отклонена и будет удалена через 10 секунд."
+
+    elif action == "post_restore":
+        # Отменяем таймер удаления карточки (Rule 3)
+        timer = _REJECT_TIMERS.pop(draft_id, None)
+        if timer:
+            timer.cancel()
+            logger.info(f"Таймер удаления карточки {draft_id} успешно отменен пользователем.")
+
+        clear_active_revision()
+        draft["status"] = "pending"
+        save_drafts(drafts)
+        mutate_draft_card_in_place(draft_id, "pending")
+        send_ephemeral_message(peer_id, f"♻️ Черновик «{draft.get('title')}» восстановлен и возвращён на согласование.", ttl_seconds=20)
+        return True, "Черновик восстановлен на согласование."
 
     return False, "Неизвестное действие."
+
 
 

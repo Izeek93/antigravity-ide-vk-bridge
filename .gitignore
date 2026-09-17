@@ -1,6 +1,11 @@
 # Environment and secrets
 .env
+.env*
+*.env
 secrets.json
+*.secrets
+*.key
+*.token
 voice_settings.json
 
 # Python bytecode and caches
@@ -61,5 +66,6 @@ omnivoice-win64/
 # IDE and OS files
 .idea/
 .vscode/
+.agents/
 Thumbs.db
 Desktop.ini

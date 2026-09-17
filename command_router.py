@@ -108,15 +108,15 @@ def dispatch_command(user_id: int, raw_text: str, payload: str = "", peer_id: Op
     clean_text = re.sub(r"^\[(?:club|public)\d+\|[^\]]+\]\s*", "", raw, flags=re.IGNORECASE).strip()
     cmd = clean_text.lower()
 
-    # 0. Интерактивные кнопки согласования отложенных постов (Одобрено / Доработка / Отклонено / Отозвать)
+    # 0. Интерактивные кнопки согласования отложенных постов (Одобрено / Доработка / Отклонено / Отозвать / Отмена / Восстановление)
     if payload:
         try:
             pdata = json.loads(payload) if isinstance(payload, str) else payload
             pcmd = pdata.get("command", "")
-            if pcmd in ("post_approve", "post_revise", "post_reject", "post_recall"):
+            if pcmd in ("post_approve", "post_revise", "post_reject", "post_recall", "post_cancel_revise", "post_restore"):
                 import post_scheduler
                 draft_id = pdata.get("draft_id", "")
-                post_scheduler.handle_approval_action(pcmd, draft_id, user_id)
+                post_scheduler.handle_approval_action(pcmd, draft_id, user_id, peer_id=peer_id)
                 return True
         except Exception as e:
             print(f"[Payload Parse Error] {e}", file=sys.stderr)
@@ -149,11 +149,8 @@ def dispatch_command(user_id: int, raw_text: str, payload: str = "", peer_id: Op
                 f"Твои замечания: «{raw_text}»\n\n"
                 f"⏳ Агент в IDE вносит правки и обновит карточку прямо в чате."
             )
-            vk.call_api("messages.send", {
-                "peer_ids": target_peer,
-                "message": ack_msg,
-                "random_id": random.randint(1, 10000000)
-            })
+            # Rule 2: Эфемерное сообщение (автоудаление через 35с)
+            post_scheduler.send_ephemeral_message(target_peer, ack_msg, ttl_seconds=35)
             return True
 
     # Текстовые эквиваленты кнопки отзыва публикации
@@ -170,10 +167,47 @@ def dispatch_command(user_id: int, raw_text: str, payload: str = "", peer_id: Op
             if approved:
                 approved.sort(key=lambda d: d.get("created_at", 0), reverse=True)
                 target_draft = approved[0]
-                post_scheduler.handle_approval_action("post_recall", target_draft["id"], user_id)
+                post_scheduler.handle_approval_action("post_recall", target_draft["id"], user_id, peer_id=peer_id)
                 return True
         except Exception as e:
             print(f"[Text Recall Error] {e}", file=sys.stderr)
+
+    # Текстовые эквиваленты отмены доработки
+    if cmd in ("отменить доработку", "↩️ отменить доработку", "отмена доработки") or cmd.startswith("отменить доработку"):
+        try:
+            import post_scheduler
+            drafts = post_scheduler.load_drafts()
+            revising = [d for d in drafts.values() if d.get("status") == "revising"]
+            if revising:
+                revising.sort(key=lambda d: d.get("created_at", 0), reverse=True)
+                post_scheduler.handle_approval_action("post_cancel_revise", revising[0]["id"], user_id, peer_id=peer_id)
+                return True
+        except Exception as e:
+            print(f"[Text Cancel Revise Error] {e}", file=sys.stderr)
+
+    # Текстовые эквиваленты восстановления / отмены удаления
+    if cmd in ("вернуть на согласование", "♻️ вернуть на согласование", "отменить удаление", "↩️ отменить удаление", "вернуть черновик") or cmd.startswith("вернуть на согласование") or cmd.startswith("отменить удаление"):
+        try:
+            import post_scheduler
+            drafts = post_scheduler.load_drafts()
+            candidates = [d for d in drafts.values() if d.get("status") in ("rejected", "recalled")]
+            if candidates:
+                candidates.sort(key=lambda d: d.get("created_at", 0), reverse=True)
+                post_scheduler.handle_approval_action("post_restore", candidates[0]["id"], user_id, peer_id=peer_id)
+                return True
+        except Exception as e:
+            print(f"[Text Restore Error] {e}", file=sys.stderr)
+
+    # Принудительная очистка беседы согласования
+    if cmd in ("почисти апрувы", "почисти \"апрувы\"", "очисти апрувы", "очистить апрувы", "/clean_approvals"):
+        import post_scheduler
+        deleted_count = post_scheduler.purge_approvals_chat()
+        reply = f"🧹 Беседа «Апрувы» полностью очищена! Удалено {deleted_count} сообщений."
+        target_peer = peer_id if peer_id is not None else user_id
+        post_scheduler.send_ephemeral_message(target_peer, reply, ttl_seconds=30)
+        return True
+
+
 
     # Текстовые эквиваленты кнопок согласования постов (с кнопками и с упоминанием бота)
     if (

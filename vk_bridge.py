@@ -29,44 +29,100 @@ if sys.stderr.encoding != "utf-8":
     except Exception:
         pass
 
+import socket
+
+# Гарантированный сокетный таймаут для предотвращения зависания сетевого стека Windows
+socket.setdefaulttimeout(35.0)
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared_ai.windows_mutex import WindowsNamedMutex
+import portalocker
+
 import config
 import vk_api_client as vk
 from command_router import dispatch_command
 from queue_manager import push_message
 from local_stt import transcribe_local_whisper
 import status_tracker
+from send_vk import send_message_to_user as vk_send_message
 
 GROUP_ID = config.VK_GROUP_ID
 MEDIA_DIR = os.path.join(os.path.dirname(__file__), "media")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "vk_bridge.log")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
-def ensure_single_instance(script_name: str = "vk_bridge.py"):
-    """Гарантирует запуск строго одного экземпляра, принудительно завершая любые старые дубликаты."""
+def log(msg: str):
+    """Потокобезопасное и немедленное логирование в консоль и файл."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
     try:
-        import psutil
-        current_pid = os.getpid()
-        parent_pid = os.getppid()
-        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+_last_vk_heartbeat = time.time()
+
+def _start_auto_ack_watchdog():
+    """Фоновый сторож очереди VK: если сообщение ожидает > 15 секунд без ответа, информирует пользователя."""
+    def _ack_loop():
+        inbox_file = os.path.join(os.path.dirname(__file__), "inbox.json")
+        lock_file = os.path.join(os.path.dirname(__file__), "inbox.lock")
+        while True:
             try:
-                pid = p.info["pid"]
-                if pid in (current_pid, parent_pid):
+                time.sleep(3)
+                if not os.path.exists(inbox_file):
                     continue
-                cmdline = p.info.get("cmdline") or []
-                is_target = any(arg.endswith(script_name) for arg in cmdline[1:])
-                if is_target and "python" in (p.info.get("name") or "").lower():
-                    print(f"⚠️ [SingleInstance] Found old running instance PID {pid}, terminating...", flush=True)
-                    p.terminate()
-                    try:
-                        p.wait(timeout=2)
-                    except psutil.TimeoutExpired:
-                        p.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-    except Exception as e:
-        print(f"[SingleInstance Warning] {e}", file=sys.stderr)
+                with portalocker.Lock(lock_file, timeout=2, fail_when_locked=False):
+                    with open(inbox_file, "r", encoding="utf-8") as f:
+                        msgs = json.load(f)
+                    if not isinstance(msgs, list) or not msgs:
+                        continue
+                    changed = False
+                    now = time.time()
+                    for m in msgs:
+                        if not m.get("auto_acked") and (now - m.get("timestamp", now)) > 15:
+                            peer_id = m.get("peer_id") or m.get("chat_id")
+                            if peer_id:
+                                try:
+                                    vk_send_message(
+                                        peer_id,
+                                        "⏳ Сообщение принято в очередь Antigravity IDE. "
+                                        "Агент обрабатывает запрос, ответ поступит сразу по готовности."
+                                    )
+                                    log(f"Auto-Ack sent to VK peer_id {peer_id}")
+                                except Exception as err:
+                                    log(f"Auto-Ack VK send error: {err}")
+                            m["auto_acked"] = True
+                            changed = True
+                    if changed:
+                        with open(inbox_file, "w", encoding="utf-8") as f:
+                            json.dump(msgs, f, ensure_ascii=False, indent=2)
+            except Exception:
+                time.sleep(1)
 
+    t = threading.Thread(target=_ack_loop, daemon=True, name="VKAutoAckWatchdog")
+    t.start()
 
-ensure_single_instance("vk_bridge.py")
+def _start_liveness_watchdog():
+    """Сторож зависания VK LongPoll сокета."""
+    def _liveness_loop():
+        global _last_vk_heartbeat
+        while True:
+            time.sleep(10)
+            elapsed = time.time() - _last_vk_heartbeat
+            if elapsed > 65:
+                log(f"🚨 [VK Liveness Watchdog] LongPoll hang detected ({elapsed:.1f}s > 65s). Self-healing exit...")
+                try:
+                    from incident_manager import report_bridge_incident
+                    report_bridge_incident("VK_BRIDGE", f"LongPoll socket hung for {elapsed:.1f}s")
+                except Exception:
+                    pass
+                os._exit(102)
+
+    t = threading.Thread(target=_liveness_loop, daemon=True, name="VKLivenessWatchdog")
+    t.start()
 
 from heartbeat_manager import start_typing_heartbeat, stop_typing_heartbeat, stop_all_heartbeats
 
@@ -269,59 +325,74 @@ def process_message(msg: dict):
 
 
 def run_longpoll():
-    """Основной отказоустойчивый цикл LongPoll прослушивания событий VK."""
-    print("🚀 Antigravity IDE VK Bridge daemon starting (v1.1.0 Decoupled)...", flush=True)
-    consecutive_errors = 0
+    """Основной отказоустойчивый цикл LongPoll прослушивания событий VK с аппаратным мьютексом."""
+    global _last_vk_heartbeat
+    log("🚀 Antigravity IDE VK Bridge daemon starting with Hardware Mutex...")
 
-    while True:
-        try:
-            lp_info = vk.call_api("groups.getLongPollServer", {"group_id": GROUP_ID})
-            server = lp_info["server"]
-            key = lp_info["key"]
-            ts = lp_info["ts"]
-            print(f"✅ Connected to VK LongPoll server ({server})", flush=True)
-            consecutive_errors = 0
+    mutex = WindowsNamedMutex("Antigravity_VK_Bridge_Mutex")
+    if not mutex.acquire():
+        log("⚠️ Another vk_bridge instance is already running (Mutex held). Exiting cleanly.")
+        sys.exit(0)
 
-            while True:
-                url = f"{server}?act=a_check&key={key}&ts={ts}&wait=25"
-                try:
-                    req = urllib.request.Request(url)
-                    with urllib.request.urlopen(req, timeout=35) as response:
-                        data = json.loads(response.read().decode("utf-8"))
-                except Exception:
-                    time.sleep(2)
-                    break
+    try:
+        _start_auto_ack_watchdog()
+        _start_liveness_watchdog()
+        consecutive_errors = 0
 
+        while True:
+            _last_vk_heartbeat = time.time()
+            try:
+                lp_info = vk.call_api("groups.getLongPollServer", {"group_id": GROUP_ID})
+                server = lp_info["server"]
+                key = lp_info["key"]
+                ts = lp_info["ts"]
+                log(f"✅ Connected to VK LongPoll server ({server})")
                 consecutive_errors = 0
-                if "failed" in data:
-                    code = data["failed"]
-                    if code == 1:
-                        ts = data["ts"]
-                    else:
+
+                while True:
+                    _last_vk_heartbeat = time.time()
+                    url = f"{server}?act=a_check&key={key}&ts={ts}&wait=25"
+                    try:
+                        req = urllib.request.Request(url)
+                        with urllib.request.urlopen(req, timeout=35) as response:
+                            data = json.loads(response.read().decode("utf-8"))
+                        _last_vk_heartbeat = time.time()
+                    except Exception:
+                        time.sleep(2)
                         break
-                    continue
 
-                ts = data.get("ts", ts)
-                updates = data.get("updates", [])
+                    consecutive_errors = 0
+                    if "failed" in data:
+                        code = data["failed"]
+                        if code == 1:
+                            ts = data["ts"]
+                        else:
+                            break
+                        continue
 
-                for update in updates:
-                    ev_type = update.get("type")
-                    if ev_type == "message_new":
-                        msg_obj = update.get("object", {}).get("message", {})
-                        if msg_obj:
-                            process_message(msg_obj)
+                    ts = data.get("ts", ts)
+                    updates = data.get("updates", [])
 
-        except Exception as e:
-            consecutive_errors += 1
-            sleep_sec = min(30, 3 + consecutive_errors * 2)
-            print(f"⚠️ LongPoll error ({consecutive_errors}): {e}. Reconnecting in {sleep_sec}s...", flush=True)
-            if consecutive_errors == 5:
-                try:
-                    from incident_manager import report_bridge_incident
-                    report_bridge_incident("VK_BRIDGE", f"5 consecutive LongPoll failures: {e}")
-                except Exception:
-                    pass
-            time.sleep(sleep_sec)
+                    for update in updates:
+                        ev_type = update.get("type")
+                        if ev_type == "message_new":
+                            msg_obj = update.get("object", {}).get("message", {})
+                            if msg_obj:
+                                process_message(msg_obj)
+
+            except Exception as e:
+                consecutive_errors += 1
+                sleep_sec = min(30, 3 + consecutive_errors * 2)
+                log(f"⚠️ LongPoll error ({consecutive_errors}): {e}. Reconnecting in {sleep_sec}s...")
+                if consecutive_errors == 5:
+                    try:
+                        from incident_manager import report_bridge_incident
+                        report_bridge_incident("VK_BRIDGE", f"5 consecutive LongPoll failures: {e}")
+                    except Exception:
+                        pass
+                time.sleep(sleep_sec)
+    finally:
+        mutex.release()
 
 
 if __name__ == "__main__":

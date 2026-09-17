@@ -1,83 +1,34 @@
+# -*- coding: utf-8 -*-
 """
 vk-bot/remote_approval_manager.py
-==================================
-Менеджер удалённых интерактивных согласований действий в IDE.
-Позволяет подтверждать/отклонять опасные операции из диалога ВКонтакте.
-Полностью изолирован от других проектов (tg-bot).
+=================================
+Тонкий адаптер-прокси к единому масштабируемому хабу shared_ai/approval_hub.py.
+Гарантирует единый источник правды (pending_approval.json) между Telegram, VK и IDE.
 """
 
 import os
-import json
-import time
-
-import vk_api_client as vk
-import config
-from vk_keyboard import get_main_keyboard
+import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-APPROVAL_FILE = os.path.join(BASE_DIR, "pending_approval.json")
+SHARED_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "shared_ai"))
+if SHARED_DIR not in sys.path:
+    sys.path.insert(0, SHARED_DIR)
 
+from approval_hub import (
+    request_remote_approval as _req,
+    resolve_approval as _res,
+    get_pending_approval as _get,
+    wait_for_approval_decision as _wait
+)
 
-def request_remote_approval(action_description: str, timeout_sec: float = 120.0) -> dict:
-    """
-    Creates a pending remote approval request and sends a prompt to VK.
-    """
-    request_id = f"req_{int(time.time())}"
-    data = {
-        "request_id": request_id,
-        "action": action_description,
-        "status": "PENDING",
-        "created_at": time.time(),
-        "timeout_sec": timeout_sec
-    }
-    with open(APPROVAL_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def request_remote_approval(action_description: str, timeout_sec: float = 90.0) -> dict:
+    return _req(action_description, timeout_sec)
 
-    # Send approval prompt to VK with inline keyboard
-    try:
-        target_uid = next(iter(config.VK_ALLOWED_USER_IDS)) if config.VK_ALLOWED_USER_IDS else None
-        if target_uid:
-            vk_text = f"🔔 Запрос подтверждения действия в IDE:\n\n«{action_description}»\n\nНажмите кнопку ниже или отправьте ответ:"
-            vk_inline_kb = {
-                "inline": True,
-                "buttons": [
-                    [
-                        {"action": {"type": "text", "label": "✅ Подтвердить"}, "color": "positive"},
-                        {"action": {"type": "text", "label": "❌ Отклонить"}, "color": "negative"}
-                    ]
-                ]
-            }
-            vk.send_message(target_uid, vk_text, keyboard=vk_inline_kb)
-    except Exception as e:
-        import sys
-        print(f"[Remote Approval VK Error] {e}", file=sys.stderr)
-
-    return data
-
-
-def resolve_approval(decision: bool) -> bool:
-    """Resolves the current pending approval request."""
-    if os.path.exists(APPROVAL_FILE):
-        try:
-            with open(APPROVAL_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            data["status"] = "APPROVED" if decision else "REJECTED"
-            data["resolved_at"] = time.time()
-            with open(APPROVAL_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception:
-            pass
-    return False
-
+def resolve_approval(decision: bool, platform: str = "vkontakte", user: str = "vk_user") -> bool:
+    return _res(decision, platform=platform, user=user)
 
 def get_pending_approval() -> dict:
-    if os.path.exists(APPROVAL_FILE):
-        try:
-            with open(APPROVAL_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if data.get("status") == "PENDING":
-                    return data
-        except Exception:
-            pass
-    return None
+    return _get()
+
+def wait_for_approval_decision(timeout_sec: float = 90.0) -> bool:
+    return _wait(timeout_sec)
